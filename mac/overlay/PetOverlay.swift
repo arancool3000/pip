@@ -18,7 +18,7 @@ final class PetView: NSView {
   var pet = CGPoint(x: -100, y: -100), petTarget = CGPoint.zero, home = CGPoint.zero
   var colour = NSColor(calibratedRed: 0.1, green: 1, blue: 0.4, alpha: 1)
   var marks: [Mark] = [], drawn: [(Mark, Double)] = []  // (mark, how much of it is drawn 0..1)
-  var marker = false, listening = false, thinking = false, status = ""
+  var marker = false, listening = false, thinking = false, status = "", thinkingSince = Date()
   var current = -1, progress = 0.0, bubble = "", bubbleAt = 0.0, lastVersion = -1, fadeAt = 0.0, alphaAll = 1.0
   var t = 0.0, blinkAt = 0.0
 
@@ -267,7 +267,11 @@ Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
         if st["on_screen"] == false { if win.isVisible { win.orderOut(nil) } } else if !win.isVisible { win.orderFrontRegardless() }
       }
       let s = j["status"] as? String ?? ""
-      if !s.isEmpty { view.status = s; view.thinking = true } else if !view.status.isEmpty { view.status = "" }
+      if !s.isEmpty { view.status = s; view.thinking = true }
+      else if view.thinking && (!view.status.isEmpty || Date().timeIntervalSince(view.thinkingSince) > 5) {
+        view.thinking = false; view.status = ""  // the brain finished, failed or never got it: stop waiting
+        if view.lastVersion == (j["version"] as? NSNumber)?.intValue { view.bubble = "" }
+      }
       if view.lastVersion == -1 { view.lastVersion = v; return }  // don't replay an old one at start-up
       if v != view.lastVersion { view.lastVersion = v; view.start(j) }
     }
@@ -341,7 +345,7 @@ func fnChanged(_ e: NSEvent) {
     if Date().timeIntervalSince(fnAt) < 0.4 { return }  // a quick tap is just fn, not talking
     guard let data = try? Data(contentsOf: clip) else { return }
     try? FileManager.default.removeItem(at: clip)
-    view.thinking = true
+    view.thinking = true; view.thinkingSince = Date()
     var req = URLRequest(url: URL(string: "http://127.0.0.1:4330/talk")!); req.httpMethod = "POST"; req.httpBody = data
     URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
   }

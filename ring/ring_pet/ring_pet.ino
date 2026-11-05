@@ -195,9 +195,13 @@ String askLine() {  // one short thing to say
     " (max 18 words): a greeting, a fun fact, a tiny joke, something about the weather or the time of day. "
     "Only the words you say, nothing else.";
   String body = "{\"contents\":[{\"parts\":[{\"text\":\"" + jsonEscape(prompt) +
-                "\"}]}],\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":0}}}";
+                "\"}]}]}";  // no thinkingBudget: 3.5 Flash Lite rejects 0
   WiFiClientSecure tls; HTTPClient http;
-  if (!postGemini("gemini-3.6-flash", body, http, tls)) { http.end(); return ""; }
+  // Flash Lites have far more free requests a day; the second one is the fallback when the first is busy
+  if (!postGemini("gemini-3.5-flash-lite", body, http, tls)) {
+    http.end();
+    if (!postGemini("gemini-3.1-flash-lite", body, http, tls)) { http.end(); return ""; }
+  }
   String s = http.getString(); http.end();
   int i = s.indexOf("\"text\": \""); if (i < 0) return "";
   String out;
@@ -221,6 +225,7 @@ int b64(char ch) {
   return -1;
 }
 
+// (on its own Wi-Fi it uses the TTS model: only ~20 a day, but it talks 4 times a day. Through the Mac it uses Live.)
 bool fetchVoice(const String &line) {  // Gemini voice (24 kHz 16-bit WAV) -> /say.raw (12 kHz 8-bit, loud)
   String body = "{\"contents\":[{\"parts\":[{\"text\":\"Say it cheerfully, like a tiny excited pet: " + jsonEscape(line) +
     "\"}]}],\"generationConfig\":{\"responseModalities\":[\"AUDIO\"],\"speechConfig\":{\"voiceConfig\":"

@@ -473,8 +473,18 @@ button himself. Tools you can use (name(args): what it does):
 
 def speak(text):  # Pip's voice on the Mac speakers
     if not settings["sound"]: return
-    voice = "Flo (English (UK))" if "Flo (English (UK))" in subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout else "Samantha"
-    subprocess.Popen(["say", "-v", voice, "-r", "200", text])
+    def go():
+        try:
+            import wave
+            pcm = live_voice(text, gemini_key())
+            f = os.path.join(tempfile.gettempdir(), "pip-say.wav")
+            with wave.open(f, "wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
+            subprocess.run(["afplay", f], timeout=120); os.remove(f)
+        except Exception as e:
+            print("live voice failed:", e, flush=True)
+            voice = "Flo (English (UK))" if "Flo (English (UK))" in subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout else "Samantha"
+            subprocess.run(["say", "-v", voice, "-r", "200", text])
+    threading.Thread(target=go, daemon=True).start()
 
 
 def owner():  # PIP_OWNER, or ~/.config/pip/name; Pip calls you this
@@ -488,18 +498,57 @@ def fill(text):
     return text.replace("{owner}", o).replace("{OWNER}", o.upper())
 
 
-def gemini(parts, key):
-    body = {"contents": [{"parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json", "thinkingConfig": {"thinkingBudget": 1024}}}
-    req = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
-        data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
-    for attempt in range(3):  # Gemini sometimes says 503 "busy"; try again
-        try: out = json.load(urllib.request.urlopen(req, timeout=60)); break
-        except urllib.error.HTTPError as e:
-            if e.code not in (429, 500, 503) or attempt == 2: raise
-            time.sleep(3 * (attempt + 1))
-    return json.loads(out["candidates"][0]["content"]["parts"][0]["text"])
+# Models, picked for the free tier: the Flash Lites have plenty of requests a day (3.6 Flash / 3.8 Flash only ~20),
+# and the Live model (unlimited) does all of Pip's speaking.
+TEXT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]  # first one busy or out of quota -> the next
+LIVE_MODEL = "gemini-3.8-live"
+VOICE = "Leda"
+
+
+def gemini(parts, key, json_out=True, think=1024):
+    cfg = {"thinkingConfig": {"thinkingBudget": think}} if think else {}  # 3.5 Flash Lite rejects a budget of 0
+    if json_out: cfg["responseMimeType"] = "application/json"
+    body = json.dumps({"contents": [{"parts": parts}], "generationConfig": cfg}).encode()
+    last = None
+    for model in TEXT_MODELS:
+        req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                     data=body, headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        for attempt in range(2):
+            try:
+                out = json.load(urllib.request.urlopen(req, timeout=60))
+                text = out["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text) if json_out else text.strip()
+            except urllib.error.HTTPError as e:
+                last = e
+                if e.code not in (429, 500, 503): break  # not a "busy" error: this model won't do, try the next
+                if e.code == 429: break                   # out of quota today: straight to the fallback
+                time.sleep(2)
+            except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
+                last = e; break
+        print(f"  {model} failed ({last}), trying the next", flush=True)
+    raise last
+
+
+def live_voice(text, key, style="cheerfully, like a tiny excited pet"):
+    """Reads text aloud with the Live model. Returns 24 kHz 16-bit mono PCM."""
+    from websockets.sync.client import connect
+    url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + key
+    with connect(url, max_size=None, open_timeout=15) as ws:
+        ws.send(json.dumps({"setup": {
+            "model": "models/" + LIVE_MODEL,
+            "generationConfig": {"responseModalities": ["AUDIO"],  # must sit inside generationConfig, not setup
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}},
+            "systemInstruction": {"parts": [{"text": f"You are a voice. Read the user's text aloud exactly as written, {style}. "
+                                                     "Never add, answer or change anything."}]}}}))
+        json.loads(ws.recv(timeout=15))  # setupComplete (frames arrive as binary JSON)
+        ws.send(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}}))
+        pcm = b""
+        while True:
+            m = json.loads(ws.recv(timeout=30))
+            sc = m.get("serverContent", {})
+            for part in sc.get("modelTurn", {}).get("parts", []):
+                if "inlineData" in part: pcm += base64.b64decode(part["inlineData"]["data"])
+            if sc.get("turnComplete"): return pcm
 
 
 def screenshot_part():
@@ -625,7 +674,7 @@ def ring_link():
 
 
 def ring_talk(mood_words):
-    """The ring asked for something to say: Gemini writes it, Gemini's voice says it, the ring plays it."""
+    """The ring asked for something to say: a Flash Lite writes it, the Live model says it, the ring plays it."""
     if not (settings["ring_talk"] and settings["sound"]): return
     key = gemini_key()
     if not key: return
@@ -635,23 +684,9 @@ def ring_talk(mood_words):
                     f"It is {now}. The weather code is {weather['code']} (WMO), {weather['temp']:.0f} degrees C. You feel {mood_words}. "
                     "Say ONE short thing out loud to {owner} (max 18 words): a greeting, a fun fact, a tiny joke, something about "
                     "the weather or the time of day. Only the words you say, nothing else.")
-        body = {"contents": [{"parts": [{"text": text}]}], "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}}
-        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
-                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
-        line = json.load(urllib.request.urlopen(req, timeout=40))["candidates"][0]["content"]["parts"][0]["text"].strip()
-        body = {"contents": [{"parts": [{"text": "Say it cheerfully, like a tiny excited pet: " + line}]}],
-                "generationConfig": {"responseModalities": ["AUDIO"],
-                                     "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Leda"}}}}}
-        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent",
-                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
-        for attempt in range(3):  # the voice model is sometimes slow or busy
-            try: out = json.load(urllib.request.urlopen(req, timeout=90)); break
-            except Exception:
-                if attempt == 2: raise
-                time.sleep(3)
-        wav = base64.b64decode(out["candidates"][0]["content"]["parts"][0]["inlineData"]["data"])
+        line = gemini([{"text": text}], key, json_out=False, think=0)
         import array, math
-        s = array.array("h", wav[44:])
+        s = array.array("h", live_voice(line, key))
         pcm = bytes(int(127.5 + 127 * math.tanh(4 * ((s[i] + s[i + 1]) / 65536)) / math.tanh(4))  # 24 kHz -> 12 kHz, loud
                     for i in range(0, len(s) - 1, 2))
         print(time.strftime("%H:%M:%S"), "ring says:", line, f"({len(pcm) // 12000}s)", flush=True)

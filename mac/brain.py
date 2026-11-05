@@ -213,7 +213,7 @@ def publish(face, context):
 
 class Board:
     """The ESP32-S3 shows up as /dev/cu.usbmodem*. One line per face: F id bgRRGGBB deco anim|caption"""
-    def __init__(self): self.fd, self.path = None, None
+    def __init__(self): self.fd, self.path, self.wlock = None, None, threading.Lock()
 
     def send(self, f):
         line = f"F {f['id']} {f['bg'][1:]} {f['deco']} {f['anim']}|{f['caption']}\n".encode()
@@ -225,10 +225,15 @@ class Board:
             except OSError:
                 os.close(self.fd); self.fd = None
 
-    def raw(self, text):
+    def raw(self, data):
+        if isinstance(data, str): data = data.encode()
         if self.fd is None and not self.open(): return
-        try: os.write(self.fd, text.encode())
-        except OSError: os.close(self.fd); self.fd = None
+        with self.wlock:
+            try:
+                while data:
+                    try: n = os.write(self.fd, data[:512]); data = data[n:]
+                    except BlockingIOError: time.sleep(0.005)
+            except OSError: os.close(self.fd); self.fd = None
 
     def open(self):
         ports = sorted(glob.glob("/dev/cu.usbmodem*"))
@@ -302,6 +307,23 @@ def watch():
 
 
 # ---- web: the simulator page, its live feed, and a test panel -----------------------------------------------
+# ---- switches (Pip's menu bar icon) ------------------------------------------------------------------------
+SETTINGS_FILE = os.path.expanduser("~/.config/pip/settings.json")
+DEFAULTS = {"sound": True,          # Pip's voice on the Mac and the ring's beeps and words
+            "on_screen": True,      # the pointer and drawings
+            "auto_look": True,      # looks at the screen by itself every few minutes
+            "fn_talk": True,        # hold fn to talk to it
+            "ring_talk": True}      # the ring chats a few times a day
+try: settings = {**DEFAULTS, **json.load(open(SETTINGS_FILE))}
+except (OSError, ValueError): settings = dict(DEFAULTS)
+
+
+def save_settings():
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    json.dump(settings, open(SETTINGS_FILE, "w"))
+    board.raw(f"S sound {int(settings['sound'])}\n")
+
+
 # ---- AI: look at the screen once, point at things, draw on them ------------------------------------------
 overlay = {"version": 0, "say": "", "draw": [], "point": None, "colour": None, "status": ""}
 asking = threading.Lock()
@@ -450,6 +472,7 @@ button himself. Tools you can use (name(args): what it does):
 
 
 def speak(text):  # Pip's voice on the Mac speakers
+    if not settings["sound"]: return
     voice = "Flo (English (UK))" if "Flo (English (UK))" in subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout else "Samantha"
     subprocess.Popen(["say", "-v", voice, "-r", "200", text])
 
@@ -575,7 +598,66 @@ def auto_look():
     while True:
         time.sleep(random.randint(240, 480))
         h = datetime.datetime.now().hour
-        if 7 <= h < 22 and idle_seconds() < 60: ask_ai()
+        if 7 <= h < 22 and idle_seconds() < 60 and settings["auto_look"] and settings["on_screen"]: ask_ai()
+
+
+# ---- the ring uses the Mac's internet while it's plugged in -------------------------------------------------
+LAT, LON = os.environ.get("PIP_LAT", "51.5074"), os.environ.get("PIP_LON", "-0.1278")
+weather = {"code": -1, "temp": 99}
+
+
+def ring_link():
+    """Every 30 minutes (and as soon as the ring is plugged in): its time, the weather, the sound switch."""
+    last_fd, last = None, 0
+    while True:
+        time.sleep(2)
+        if board.fd is None: board.open()
+        if board.fd is None: continue
+        if board.fd != last_fd or time.time() - last > 1800:  # new connection (plugged in, or after an upload)
+            time.sleep(2); last_fd, last = board.fd, time.time()
+            try:
+                w = json.load(urllib.request.urlopen(f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}"
+                                                     "&current=temperature_2m,weather_code", timeout=15))["current"]
+                weather.update(code=int(w["weather_code"]), temp=float(w["temperature_2m"]))
+            except Exception as e: print("weather failed:", e, flush=True)
+            board.raw(f"T{int(time.time())}\nW {weather['code']} {weather['temp']:.1f}\nS sound {int(settings['sound'])}\n")
+            board.raw(f"M {state['face']['mood']}\n")  # keeps the ring knowing the laptop is there
+
+
+def ring_talk(mood_words):
+    """The ring asked for something to say: Gemini writes it, Gemini's voice says it, the ring plays it."""
+    if not (settings["ring_talk"] and settings["sound"]): return
+    key = gemini_key()
+    if not key: return
+    try:
+        now = datetime.datetime.now().strftime("%A %H:%M")
+        text = fill(f"You are Pip, a tiny cheerful pet like a five-year-old who lives in a glowing LED ring on {{owner}}'s desk. "
+                    f"It is {now}. The weather code is {weather['code']} (WMO), {weather['temp']:.0f} degrees C. You feel {mood_words}. "
+                    "Say ONE short thing out loud to {owner} (max 18 words): a greeting, a fun fact, a tiny joke, something about "
+                    "the weather or the time of day. Only the words you say, nothing else.")
+        body = {"contents": [{"parts": [{"text": text}]}], "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}}
+        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        line = json.load(urllib.request.urlopen(req, timeout=40))["candidates"][0]["content"]["parts"][0]["text"].strip()
+        body = {"contents": [{"parts": [{"text": "Say it cheerfully, like a tiny excited pet: " + line}]}],
+                "generationConfig": {"responseModalities": ["AUDIO"],
+                                     "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Leda"}}}}}
+        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent",
+                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        for attempt in range(3):  # the voice model is sometimes slow or busy
+            try: out = json.load(urllib.request.urlopen(req, timeout=90)); break
+            except Exception:
+                if attempt == 2: raise
+                time.sleep(3)
+        wav = base64.b64decode(out["candidates"][0]["content"]["parts"][0]["inlineData"]["data"])
+        import array, math
+        s = array.array("h", wav[44:])
+        pcm = bytes(int(127.5 + 127 * math.tanh(4 * ((s[i] + s[i + 1]) / 65536)) / math.tanh(4))  # 24 kHz -> 12 kHz, loud
+                    for i in range(0, len(s) - 1, 2))
+        print(time.strftime("%H:%M:%S"), "ring says:", line, f"({len(pcm) // 12000}s)", flush=True)
+        board.raw(f"V {len(pcm)}\n".encode() + pcm)
+    except Exception as e:
+        print("ring talk failed:", e, flush=True)
 
 
 def serial_reader():  # the ring pet says "ASK" when its wheel is held 3 s
@@ -588,7 +670,11 @@ def serial_reader():  # the ring pet says "ASK" when its wheel is held 3 s
         except OSError: continue
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            if line.strip() == b"ASK": threading.Thread(target=ask_ai, daemon=True).start()
+            line = line.strip()
+            if line and line not in (b"ASK",): print("  ring:", line.decode(errors="ignore")[:100], flush=True)
+            if line == b"ASK" and settings["on_screen"]: threading.Thread(target=ask_ai, daemon=True).start()
+            elif line.startswith(b"TALK"):  # "TALK <mood words>"
+                threading.Thread(target=ring_talk, args=(line[5:].decode(errors="ignore") or "happy",), daemon=True).start()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -597,7 +683,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"): return self.file("sim.html", "text/html")
         if self.path == "/face.js": return self.file("face.js", "text/javascript")
-        if self.path == "/overlay": return self.json(overlay)
+        if self.path == "/overlay": return self.json({**overlay, "settings": settings})
+        if self.path == "/settings": return self.json(settings)
         if self.path == "/state": return self.json({**state, "moods": list(MOODS)})
         if self.path == "/events":
             q = queue.Queue(); listeners.append(q)
@@ -614,6 +701,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/settings" and self.headers.get("Origin") is None:  # the menu bar's switches
+            body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 2000)) or b"{}")
+            for k, v in body.items():
+                if k in DEFAULTS: settings[k] = bool(v)
+            save_settings(); return self.json(settings)
+        if self.path == "/talk" and self.headers.get("Origin") is None and not settings["fn_talk"]: return self.json({"ok": False})
         if self.path == "/talk" and self.headers.get("Origin") is None:  # the overlay's fn-key recording (WAV)
             audio = self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 20_000_000))
             threading.Thread(target=ask_ai, args=(audio,), daemon=True).start(); return self.json({"ok": True})
@@ -651,6 +744,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 if __name__ == "__main__":
     threading.Thread(target=resend_loop, daemon=True).start()
     threading.Thread(target=serial_reader, daemon=True).start()
+    threading.Thread(target=ring_link, daemon=True).start()
     if "--no-auto" not in sys.argv and "--no-watch" not in sys.argv: threading.Thread(target=auto_look, daemon=True).start()
     if "--no-watch" not in sys.argv: threading.Thread(target=watch, daemon=True).start()
     print(f"DeskPet simulator: http://localhost:{PORT}", flush=True)

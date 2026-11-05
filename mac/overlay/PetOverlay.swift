@@ -262,6 +262,10 @@ Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
     guard let data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let v = (j["version"] as? NSNumber)?.intValue else { return }
     DispatchQueue.main.async {
+      if let st = j["settings"] as? [String: Bool] {
+        menu.update(st)
+        if st["on_screen"] == false { if win.isVisible { win.orderOut(nil) } } else if !win.isVisible { win.orderFrontRegardless() }
+      }
       let s = j["status"] as? String ?? ""
       if !s.isEmpty { view.status = s; view.thinking = true } else if !view.status.isEmpty { view.status = "" }
       if view.lastVersion == -1 { view.lastVersion = v; return }  // don't replay an old one at start-up
@@ -269,12 +273,59 @@ Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
     }
   }.resume()
 }
+// ---- the menu bar icon: switch Pip's bits on and off ----
+final class PipMenu: NSObject {
+  let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+  let menu = NSMenu()
+  var current: [String: Bool] = [:]
+  let switches: [(String, String)] = [("sound", "Sound"), ("on_screen", "Pet on screen"),
+                                      ("auto_look", "Looks at my screen by itself"), ("fn_talk", "Hold fn to talk"),
+                                      ("ring_talk", "Ring chats by itself")]
+  override init() {
+    super.init()
+    item.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Pip")
+    for (key, title) in switches {
+      let m = NSMenuItem(title: title, action: #selector(toggle(_:)), keyEquivalent: "")
+      m.target = self; m.representedObject = key; menu.addItem(m)
+    }
+    menu.addItem(.separator())
+    let off = NSMenuItem(title: "Everything off", action: #selector(allOff), keyEquivalent: ""); off.target = self; menu.addItem(off)
+    let on = NSMenuItem(title: "Everything on", action: #selector(allOn), keyEquivalent: ""); on.target = self; menu.addItem(on)
+    let look = NSMenuItem(title: "Look at my screen now", action: #selector(lookNow), keyEquivalent: ""); look.target = self; menu.addItem(look)
+    menu.addItem(.separator())
+    let quit = NSMenuItem(title: "Quit Pip", action: #selector(quit), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
+    item.menu = menu
+  }
+  func update(_ s: [String: Bool]) {
+    current = s
+    for m in menu.items { if let k = m.representedObject as? String { m.state = s[k] == true ? .on : .off } }
+    item.button?.appearsDisabled = !s.values.contains(true)
+  }
+  func send(_ body: [String: Bool]) {
+    var req = URLRequest(url: URL(string: "http://127.0.0.1:4330/settings")!); req.httpMethod = "POST"
+    req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+      if let data, let s = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] { DispatchQueue.main.async { self.update(s) } }
+    }.resume()
+  }
+  @objc func toggle(_ m: NSMenuItem) { if let k = m.representedObject as? String { send([k: m.state != .on]) } }
+  @objc func allOff() { send(Dictionary(uniqueKeysWithValues: switches.map { ($0.0, false) })) }
+  @objc func allOn() { send(Dictionary(uniqueKeysWithValues: switches.map { ($0.0, true) })) }
+  @objc func lookNow() {
+    var req = URLRequest(url: URL(string: "http://127.0.0.1:4330/ask")!); req.httpMethod = "POST"
+    URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
+  }
+  @objc func quit() { NSApp.terminate(nil) }
+}
+let menu = PipMenu()
+
 // ---- hold fn to talk to Pip ----
 // Records the mic only while fn is held, then sends the clip (and brain.py takes one screenshot) to Gemini.
 var recorder: AVAudioRecorder?
 let clip = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("pip-talk.wav")
 var fnDown = false, fnAt = Date()
 func fnChanged(_ e: NSEvent) {
+  if menu.current["fn_talk"] == false { return }
   let down = e.modifierFlags.contains(.function) && e.keyCode == 63
   if down == fnDown { return }
   fnDown = down

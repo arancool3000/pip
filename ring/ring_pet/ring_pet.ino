@@ -10,7 +10,8 @@
 //  Tap the wheel ......... feed it: munch munch
 //  Hold the wheel 1 s .... it tells you the time
 //  Hold the wheel 3 s .... looks at your laptop screen (with mac/run.sh running), or with no laptop, says something
-//  No laptop: with Wi-Fi in secrets.h it shows the weather (sunny / rainy / snowy / stormy / cold) and, with a
+//  Plugged into the Mac (mac/run.sh): it uses the Mac's internet for the time, weather and its voice.
+//  Away from the Mac: with Wi-Fi in secrets.h it shows the weather (sunny / rainy / snowy / stormy / cold) and, with a
 //  Gemini key in secrets.h, chats out loud at 8:00, 12:30, 17:00 and 19:30 in a real voice.
 //  Hold BOOT 3 s ......... says the wiring
 //  Laptop: run mac/run.sh and it reacts to what's on your screen (coding = concentrating, music = bopping,
@@ -61,7 +62,9 @@ void speakerIdle() {
   pinMode(SPK_A, OUTPUT); pinMode(SPK_B, OUTPUT);
   digitalWrite(SPK_A, LOW); digitalWrite(SPK_B, LOW);
 }
+bool soundOn = true;  // the Mac's menu bar can switch Pip's sounds off ("S sound 0")
 void beep(int hz, int ms) {
+  if (!soundOn) { delay(ms); return; }
   uint32_t half = 500000UL / hz, end = millis() + ms;
   while ((int32_t)(millis() - end) < 0) {
     digitalWrite(SPK_A, HIGH); digitalWrite(SPK_B, LOW); delayMicroseconds(half);
@@ -73,6 +76,7 @@ void slide(int from, int to, int ms) {  // pitch glide: the pet's "voice"
   for (int i = 0; i < ms; i += 8) beep(from + (to - from) * i / ms, 8);
 }
 void playRaw(const uint8_t *d, uint32_t len, int rate) {
+  if (!soundOn) return;
   ledcAttach(SPK_A, 156250, 8); ledcAttach(SPK_B, 156250, 8); ledcOutputInvert(SPK_B, true);
   uint32_t t = micros();
   for (uint32_t i = 0; i < len; i++) {
@@ -330,6 +334,27 @@ void readSerial() {  // "T<unix time>" from settime.py, "M <mood>" from brain.py
   if (!Serial.available()) return;
   String line = Serial.readStringUntil('\n'); line.trim();
   if (line.startsWith("T")) { setClock((time_t)line.substring(1).toInt()); Serial.println("time set from Mac"); return; }
+  if (line.startsWith("W ")) {  // "W <code> <temp>": the weather, from the Mac's internet
+    int sp = line.indexOf(' ', 2);
+    weatherCode = line.substring(2, sp).toInt(); tempC = line.substring(sp + 1).toFloat();
+    return;
+  }
+  if (line.startsWith("S sound ")) { soundOn = line.endsWith("1"); return; }
+  if (line.startsWith("V ")) {  // "V <bytes>" then that many bytes of 12 kHz 8-bit voice
+    int len = line.substring(2).toInt();
+    File f = LittleFS.open("/say.raw", "w");
+    uint8_t buf[512]; int got = 0;
+    while (got < len) {
+      int n = Serial.readBytes(buf, min((int)sizeof(buf), len - got));
+      if (n <= 0) break;  // the Mac stopped sending (timeout)
+      if (f) f.write(buf, n);
+      got += n;
+    }
+    if (f) f.close();
+    Serial.printf("voice from Mac: %d bytes\n", got);
+    if (got == len) talkReady = true;
+    return;
+  }
   if (!line.startsWith("M ")) return;
   String key = " " + line.substring(2) + " ";
   for (int i = 0; i < (int)(sizeof(LOOKS) / sizeof(LOOKS[0])); i++)
@@ -458,8 +483,15 @@ String moodWords() {
   }
 }
 
+// something to say: over its own Wi-Fi if it has some, otherwise the Mac fetches it (if plugged in)
+void askToTalk() {
+  if (wifiConfigured()) wantTalk = true;
+  else Serial.println("TALK " + moodWords());
+}
+
 // plays /say.raw with the mouth moving to the voice
 void playVoice() {
+  if (!soundOn) return;
   File f = LittleFS.open("/say.raw", "r");
   if (!f) return;
   ledcAttach(SPK_A, 156250, 8); ledcAttach(SPK_B, 156250, 8); ledcOutputInvert(SPK_B, true);
@@ -500,7 +532,9 @@ int readWheel() {
 }
 
 void setup() {
+  Serial.setRxBufferSize(4096);  // voice clips arrive from the Mac in a hurry
   Serial.begin(115200);
+  Serial.setTimeout(500);
   speakerIdle();
   pinMode(BOOT, INPUT_PULLUP);
   pinMode(ENC_A, INPUT_PULLUP); pinMode(ENC_B, INPUT_PULLUP); pinMode(ENC_SW, INPUT_PULLUP);
@@ -530,7 +564,7 @@ void loop() {
     int hm = tt.tm_hour * 60 + tt.tm_min, slot = -1;
     const int SLOTS[] = {8 * 60, 12 * 60 + 30, 17 * 60, 19 * 60 + 30};
     for (int i = 0; i < 4; i++) if (hm == SLOTS[i]) slot = i;
-    if (slot >= 0 && slot != lastTalkSlot) { lastTalkSlot = slot; wantTalk = true; }
+    if (slot >= 0 && slot != lastTalkSlot) { lastTalkSlot = slot; askToTalk(); }
   }
   uint32_t now = millis();
 
@@ -580,7 +614,7 @@ void loop() {
   if (!sw && swWas && held) {
     touched();
     if (held3) {  // laptop there: it looks at the screen; no laptop: it says something by itself
-      if (screenLive()) Serial.println("ASK"); else wantTalk = true;
+      if (screenLive()) Serial.println("ASK"); else askToTalk();
       excitedUntil = now + 3000; slide(900, 2400, 200);
     }
     else sayTime();

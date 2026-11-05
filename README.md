@@ -12,6 +12,8 @@ a box of crayons.
   own pointer over and draws on it: crayon stars, hearts and smileys, sometimes wild toddler marker scribbles.
 - **Helpful when you're working:** it does the sums on your screen, fills in spreadsheet gaps, fixes slips in docs
   and tells you how to make slides look better, and puts the answers on your clipboard for Command-V.
+- **No laptop needed:** with Wi-Fi it shows the weather on its face (sunny, rainy, snowy, stormy, cold) and, with a
+  Gemini key, says something out loud in a real voice at 8:00, 12:30, 17:00 and 19:30, or when you hold the wheel 3 s.
 - **Hold fn and talk to it.** It answers out loud, and can use the Ember desktop app's tools (if you have it) to
   actually do things (click, type, open, look up, calculate). It never sends, buys, deletes or touches passwords.
 

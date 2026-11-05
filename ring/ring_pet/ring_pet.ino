@@ -9,7 +9,9 @@
 //  Turn the wheel ........ stroke it: the light swirls after your hand and it purrs
 //  Tap the wheel ......... feed it: munch munch
 //  Hold the wheel 1 s .... it tells you the time
-//  Hold the wheel 3 s .... it looks at your laptop screen (with mac/run.sh + overlay running)
+//  Hold the wheel 3 s .... looks at your laptop screen (with mac/run.sh running), or with no laptop, says something
+//  No laptop: with Wi-Fi in secrets.h it shows the weather (sunny / rainy / snowy / stormy / cold) and, with a
+//  Gemini key in secrets.h, chats out loud at 8:00, 12:30, 17:00 and 19:30 in a real voice.
 //  Hold BOOT 3 s ......... says the wiring
 //  Laptop: run mac/run.sh and it reacts to what's on your screen (coding = concentrating, music = bopping,
 //  YouTube = watching, games = excited, errors = worried, idle = falls asleep, switching apps a lot = dizzy).
@@ -21,7 +23,20 @@
 #include "esp_sntp.h"
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <LittleFS.h>
 #include "secrets.h"
+#ifndef GEMINI_KEY
+#define GEMINI_KEY ""        // no key: weather moods still work, it just doesn't talk
+#endif
+#ifndef LAT
+#define LAT "51.5074"        // where the weather comes from (London)
+#define LON "-0.1278"
+#endif
+#ifndef PET_OWNER
+#define PET_OWNER "my human"
+#endif
 #include "clips.h"
 #include "wiring.h"
 
@@ -98,23 +113,183 @@ void sayTime() {
   else { if (t.tm_min < 10) say(W_OH); sayNumber(t.tm_min); }
   say(t.tm_hour < 12 ? W_AM : W_PM);
 }
-bool wWait = false;
-uint32_t wStarted = 0, nextSync = 0;
-void startSync() {
-  if (strcmp(WIFI_SSID, "your-wifi-name") == 0) { nextSync = millis() + 0x7fffffff; return; }
+// ---------- on its own, with no laptop: Wi-Fi for a few seconds at a time ----------
+// Every 30 minutes: time + weather. A few times a day (and when you hold the wheel 3 s with no laptop): it asks
+// Gemini for something to say, fetches it as a real voice, saves it to flash, then plays it. All of this runs in
+// its own task so the face keeps moving; Wi-Fi is off again within about 20 seconds.
+volatile bool wantTalk = false, talkReady = false, netBusy = false;
+volatile int weatherCode = -1;
+volatile float tempC = 99;
+uint8_t loud[256];  // makes the voice loud enough with no amplifier
+
+bool wifiConfigured() { return strcmp(WIFI_SSID, "your-wifi-name") != 0; }
+
+bool wifiUp() {
   WiFi.mode(WIFI_STA); WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  configTzTime(TIMEZONE, "pool.ntp.org", "time.google.com");
-  wWait = true; wStarted = millis();
+  for (int i = 0; i < 150 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+  return WiFi.status() == WL_CONNECTED;
 }
-void serviceSync() {
-  if (!wWait) { if ((int32_t)(millis() - nextSync) >= 0) startSync(); return; }
-  bool got = WiFi.status() == WL_CONNECTED && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED;
-  if (got || millis() - wStarted > 30000) {
-    WiFi.disconnect(true); WiFi.mode(WIFI_OFF); wWait = false;
-    nextSync = millis() + (got ? 6UL * 3600 * 1000 : 10UL * 60 * 1000);
+void wifiDown() { WiFi.disconnect(true); WiFi.mode(WIFI_OFF); }
+
+float numAfter(const String &s, const char *key, int from) {
+  int i = s.indexOf(key, from);
+  return i < 0 ? -999 : s.substring(i + strlen(key)).toFloat();
+}
+
+void fetchWeather() {
+  HTTPClient http;
+  http.begin("http://api.open-meteo.com/v1/forecast?latitude=" LAT "&longitude=" LON "&current=temperature_2m,weather_code");
+  if (http.GET() == 200) {
+    String s = http.getString();
+    int cur = s.indexOf("\"current\":{");
+    if (cur >= 0) {
+      float t = numAfter(s, "\"temperature_2m\":", cur), w = numAfter(s, "\"weather_code\":", cur);
+      if (t > -100) tempC = t;
+      if (w > -100) weatherCode = (int)w;
+      Serial.printf("weather %.1fC code %d\n", tempC, weatherCode);
+    }
+  }
+  http.end();
+}
+
+const char *weatherWords() {
+  int w = weatherCode;
+  if (w < 0) return "unknown";
+  if (w <= 1) return "sunny";
+  if (w <= 3) return "cloudy";
+  if (w <= 48) return "foggy";
+  if (w <= 67 || (w >= 80 && w <= 82)) return "rainy";
+  if (w <= 77 || w == 85 || w == 86) return "snowy";
+  return "stormy";
+}
+
+String jsonEscape(const String &s) {
+  String o;
+  for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; if (ch >= 32 && ch < 127) o += ch; }
+  return o;
+}
+
+bool postGemini(const char *model, const String &body, HTTPClient &http, WiFiClientSecure &tls) {
+  tls.setInsecure();  // hobby project: no certificate store on the C3
+  http.setTimeout(60000);
+  http.begin(tls, String("https://generativelanguage.googleapis.com/v1beta/models/") + model + ":generateContent");
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-goog-api-key", GEMINI_KEY);
+  int code = http.POST(body);
+  if (code != 200) Serial.printf("%s: http %d\n", model, code);
+  return code == 200;
+}
+
+String moodWords();
+String askLine() {  // one short thing to say
+  struct tm t; char when[40] = "";
+  if (haveTime(t)) strftime(when, sizeof(when), "%A %H:%M", &t);
+  String prompt = String("You are Pip, a tiny cheerful pet like a five-year-old who lives in a glowing LED ring on ") +
+    PET_OWNER + "'s desk. It is " + when + ". The weather outside is " + weatherWords() + ", " + String(tempC, 0) +
+    " degrees C. You feel " + moodWords() + ". Say ONE short thing out loud to " + PET_OWNER +
+    " (max 18 words): a greeting, a fun fact, a tiny joke, something about the weather or the time of day. "
+    "Only the words you say, nothing else.";
+  String body = "{\"contents\":[{\"parts\":[{\"text\":\"" + jsonEscape(prompt) +
+                "\"}]}],\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":0}}}";
+  WiFiClientSecure tls; HTTPClient http;
+  if (!postGemini("gemini-3.6-flash", body, http, tls)) { http.end(); return ""; }
+  String s = http.getString(); http.end();
+  int i = s.indexOf("\"text\": \""); if (i < 0) return "";
+  String out;
+  for (i += 9; i < (int)s.length() && s[i] != '"'; i++) {
+    if (s[i] == '\\' && i + 1 < (int)s.length()) {
+      char e = s[++i];
+      if (e == 'u') { i += 4; out += '\''; } else if (e == 'n') out += ' '; else out += e;
+    } else out += s[i];
+  }
+  out.trim();
+  Serial.println("Pip says: " + out);
+  return out;
+}
+
+int b64(char ch) {
+  if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+  if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
+  if (ch >= '0' && ch <= '9') return ch - '0' + 52;
+  if (ch == '+') return 62;
+  if (ch == '/') return 63;
+  return -1;
+}
+
+bool fetchVoice(const String &line) {  // Gemini voice (24 kHz 16-bit WAV) -> /say.raw (12 kHz 8-bit, loud)
+  String body = "{\"contents\":[{\"parts\":[{\"text\":\"Say it cheerfully, like a tiny excited pet: " + jsonEscape(line) +
+    "\"}]}],\"generationConfig\":{\"responseModalities\":[\"AUDIO\"],\"speechConfig\":{\"voiceConfig\":"
+    "{\"prebuiltVoiceConfig\":{\"voiceName\":\"Leda\"}}}}}";
+  WiFiClientSecure tls; HTTPClient http;
+  if (!postGemini("gemini-3.8-flash-tts", body, http, tls)) { http.end(); return false; }
+  File f = LittleFS.open("/say.raw", "w");
+  if (!f) { http.end(); return false; }
+  WiFiClient *s = http.getStreamPtr();
+  const char *key = "\"data\": \"";
+  int matched = 0, quad[4], qn = 0, pairN = 0, bn = 0;
+  bool inData = false, haveLo = false, finished = false;
+  uint32_t bytesOut = 0, idle = millis();
+  uint8_t lo = 0, buf[512], in[256];
+  int32_t pairSum = 0;
+  while (!finished && millis() - idle < 15000) {
+    int av = s->available();
+    int n = av > 0 ? s->readBytes(in, min(256, av)) : 0;
+    if (n <= 0) { if (!http.connected()) break; delay(2); continue; }
+    idle = millis();
+    for (int k = 0; k < n && !finished; k++) {
+      char ch = in[k];
+      if (!inData) {
+        matched = (ch == key[matched]) ? matched + 1 : (ch == key[0] ? 1 : 0);
+        if (!key[matched]) inData = true;
+        continue;
+      }
+      if (ch == '"') { finished = true; break; }
+      int v = b64(ch); if (v < 0) continue;
+      quad[qn++] = v; if (qn < 4) continue; qn = 0;
+      uint8_t three[3] = {(uint8_t)(quad[0] << 2 | quad[1] >> 4), (uint8_t)(quad[1] << 4 | quad[2] >> 2), (uint8_t)(quad[2] << 6 | quad[3])};
+      for (uint8_t by : three) {
+        if (bytesOut++ < 44) continue;  // the WAV header
+        if (!haveLo) { lo = by; haveLo = true; continue; }
+        haveLo = false;
+        pairSum += (int16_t)(by << 8 | lo);
+        if (++pairN < 2) continue;  // 24 kHz -> 12 kHz
+        int16_t smp = pairSum / 2; pairSum = 0; pairN = 0;
+        buf[bn++] = loud[(smp >> 8) + 128];
+        if (bn == (int)sizeof(buf)) { f.write(buf, bn); bn = 0; }
+      }
+    }
+  }
+  if (bn) f.write(buf, bn);
+  uint32_t len = f.size(); f.close(); http.end();
+  Serial.printf("voice saved: %u bytes\n", len);
+  return len > 2000;
+}
+
+void netTask(void *) {
+  uint32_t nextRun = 0;
+  for (;;) {
+    if (wifiConfigured() && ((int32_t)(millis() - nextRun) >= 0 || wantTalk)) {
+      netBusy = true;
+      bool talk = wantTalk;
+      if (wifiUp()) {
+        struct tm t;
+        if (!haveTime(t)) {
+          configTzTime(TIMEZONE, "pool.ntp.org", "time.google.com");
+          for (int i = 0; i < 100 && sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED; i++) delay(100);
+        }
+        fetchWeather();
+        if (talk && GEMINI_KEY[0]) { String line = askLine(); if (line.length() && fetchVoice(line)) talkReady = true; }
+      }
+      wifiDown();
+      if (talk) wantTalk = false;
+      nextRun = millis() + 30UL * 60 * 1000;
+      netBusy = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
+
 // ---------- what's on the laptop screen (sent by mac/run.sh as "M <mood>") ----------
 struct Look { const char *names; uint8_t r, g, b, eyes, mouth, sound; };
 // eyes: 0 normal, 1 closed, 2 darting, 3 spinning, 4 steady (concentrating)
@@ -132,7 +307,20 @@ const Look LOOKS[] = {
   {" dizzy ",                             255, 255, 0, 3, 3, 0},
   {" bored waiting ",                     150, 0, 255, 0, 1, 4},
   {" sleepy late asleep night ",          0, 10, 90, 1, 1, 3},
+  // the weather, when there's no laptop
+  {" sunny ",                             255, 200, 0, 0, 0, 0},
+  {" rainy foggy ",                       30, 80, 255, 0, 1, 0},
+  {" snowy cold ",                        180, 230, 255, 2, 3, 0},
+  {" stormy ",                            140, 0, 255, 2, 3, 0},
 };
+int weatherLook() {
+  if (weatherCode < 0) return -1;
+  const char *w = tempC < 4 ? "cold" : weatherWords();
+  if (!strcmp(w, "cloudy")) return -1;  // nothing special
+  String key = String(" ") + w + " ";
+  for (int i = 0; i < (int)(sizeof(LOOKS) / sizeof(LOOKS[0])); i++) if (strstr(LOOKS[i].names, key.c_str())) return i;
+  return -1;
+}
 int screenLook = -1;          // -1 = no laptop
 uint32_t screenAt = 0;
 void playSound(int s);
@@ -200,8 +388,9 @@ void drawPet() {
   float r, g, b; moodColour(m, r, g, b);
   uint32_t now = millis();
   int eyes = m == ASLEEP ? 1 : 0, mouthStyle = -1;
-  if (screenLive() && (m == HAPPY || m == BORED || m == ASLEEP)) {
-    const Look &L = LOOKS[screenLook];
+  int lk = screenLive() ? screenLook : (m == ASLEEP ? -1 : weatherLook());
+  if (lk >= 0 && (m == HAPPY || m == BORED || m == ASLEEP)) {
+    const Look &L = LOOKS[lk];
     r = L.r; g = L.g; b = L.b; eyes = L.eyes; mouthStyle = L.mouth;
     if (eyes == 1) m = ASLEEP; else if (m == ASLEEP) m = HAPPY;
   }
@@ -258,6 +447,43 @@ void playSound(int s) {
 }
 bool screenLive() { return screenLook >= 0 && millis() - screenAt < 1800000UL; }  // laptop spoke in the last 30 min
 
+String moodWords() {
+  switch (mood()) {
+    case HUNGRY: return "hungry";
+    case BORED: return "a bit bored";
+    case EXCITED: return "excited";
+    case ASLEEP: return "sleepy";
+    case CROSS: return "grumpy";
+    default: return "happy";
+  }
+}
+
+// plays /say.raw with the mouth moving to the voice
+void playVoice() {
+  File f = LittleFS.open("/say.raw", "r");
+  if (!f) return;
+  ledcAttach(SPK_A, 156250, 8); ledcAttach(SPK_B, 156250, 8); ledcOutputInvert(SPK_B, true);
+  uint8_t buf[256]; uint32_t t = micros();
+  float r, g, b; moodColour(HAPPY, r, g, b);
+  int n;
+  while ((n = f.read(buf, sizeof(buf))) > 0) {
+    int peak = 0;
+    for (int i = 0; i < n; i++) {
+      ledcWrite(SPK_A, buf[i]); ledcWrite(SPK_B, buf[i]);
+      peak = max(peak, abs(buf[i] - 128));
+      t += 1000000 / 12000;
+      while ((int32_t)(micros() - t) < 0) {}
+    }
+    float o = min(1.0f, peak / 90.0f);  // mouth opens with the sound
+    add(EYE_L, 255, 255, 255); add(EYE_R, 255, 255, 255);
+    add(MOUTH[1], r, g, b); add(MOUTH[0], r * o, g * o, b * o); add(MOUTH[2], r * o, g * o, b * o);
+    ring.setBrightness(BRIGHT); show();
+  }
+  f.close();
+  ledcDetach(SPK_A); ledcDetach(SPK_B);
+  speakerIdle();
+}
+
 void touched() {
   lastTouch = millis();
   if (asleepNow() && millis() > crossUntil) { crossUntil = millis() + 3000; chirpGrumpy(); }
@@ -288,12 +514,24 @@ void setup() {
   spinColour(0, 220, 255, 800);   // waking up
   chirpHappy();
   lastTouch = millis();
-  startSync();
+  for (int i = 0; i < 256; i++) loud[i] = (uint8_t)(127.5f + 127 * tanhf(4 * (i - 128) / 128.0f) / tanhf(4));
+  LittleFS.begin(true);
+  xTaskCreate(netTask, "net", 16384, NULL, 1, NULL);
 }
 
 void loop() {
   readSerial();
-  serviceSync();
+  if (talkReady) { talkReady = false; playVoice(); lastTouch = millis(); }
+
+  // talks by itself a few times a day when there's no laptop around (8:00, 12:30, 17:00, 19:30)
+  static int lastTalkSlot = -1;
+  struct tm tt;
+  if (!screenLive() && haveTime(tt)) {
+    int hm = tt.tm_hour * 60 + tt.tm_min, slot = -1;
+    const int SLOTS[] = {8 * 60, 12 * 60 + 30, 17 * 60, 19 * 60 + 30};
+    for (int i = 0; i < 4; i++) if (hm == SLOTS[i]) slot = i;
+    if (slot >= 0 && slot != lastTalkSlot) { lastTalkSlot = slot; wantTalk = true; }
+  }
   uint32_t now = millis();
 
   // BOOT is only for the wiring: hold it 3 s
@@ -341,7 +579,10 @@ void loop() {
   if (sw && rotating) held = held3 = true;  // no beeps or time while turning
   if (!sw && swWas && held) {
     touched();
-    if (held3) { Serial.println("ASK"); excitedUntil = now + 3000; slide(900, 2400, 200); }
+    if (held3) {  // laptop there: it looks at the screen; no laptop: it says something by itself
+      if (screenLive()) Serial.println("ASK"); else wantTalk = true;
+      excitedUntil = now + 3000; slide(900, 2400, 200);
+    }
     else sayTime();
   }
   if (!sw && swWas && !held) {

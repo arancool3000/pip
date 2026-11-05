@@ -1,0 +1,7 @@
+secrets.h
+clips.h
+wiring.h
+*.app/
+__pycache__/
+*.log
+.DS_Store

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeskPet Simulator</title>
+<style>
+  :root { --bg: #f4f1ec; --card: #fff; --ink: #2b2235; --muted: #7a7285; --line: #e4dfd8; --accent: #6b5bd6; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #17151c; --card: #221f29; --ink: #eee9f5; --muted: #9a93a8; --line: #34303d; --accent: #9d8ff0; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; display: grid; grid-template-columns: 300px 1fr; gap: 28px; }
+  @media (max-width: 760px) { .wrap { grid-template-columns: 1fr; } }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 22px 0 8px; }
+  .muted { color: var(--muted); font-size: 12.5px; }
+  /* the board: black bezel around the 172x320 screen, USB-C on top, side buttons */
+  .board { position: relative; width: 230px; margin: 18px auto 10px; padding: 22px 18px; background: #111; border-radius: 34px; box-shadow: 0 14px 30px rgba(0,0,0,.25), inset 0 0 0 2px #333; }
+  .board::before { content: ""; position: absolute; top: -10px; left: 50%; transform: translateX(-50%); width: 64px; height: 12px; background: #c9c9c9; border-radius: 4px 4px 0 0; }
+  .board .btn { position: absolute; top: 120px; width: 8px; height: 34px; background: #444; border-radius: 3px; }
+  .board .btn.l { left: -8px; } .board .btn.r { right: -8px; }
+  canvas#screen { display: block; width: 172px; height: 320px; margin: 0 auto; border-radius: 16px; image-rendering: auto; cursor: pointer; }
+  .status { text-align: center; font-size: 12.5px; color: var(--muted); min-height: 38px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .moods { display: flex; flex-wrap: wrap; gap: 6px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 5px 10px; border-radius: 999px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+  input { width: 100%; font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .go { margin-top: 10px; background: var(--accent); color: #fff; border-color: var(--accent); }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(58px, 1fr)); gap: 6px; max-height: 520px; overflow: auto; padding: 2px; }
+  .gallery canvas { width: 100%; aspect-ratio: 172/320; border-radius: 6px; cursor: pointer; border: 2px solid transparent; }
+  .gallery canvas.on { border-color: var(--accent); }
+  .offline { color: #c0392b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>DeskPet</h1>
+    <div class="muted">ESP32-S3-LCD-1.47 · 172 × 320. Click the screen to poke it.</div>
+    <div class="board"><span class="btn l"></span><span class="btn r"></span><canvas id="screen" width="344" height="640"></canvas></div>
+    <div class="status" id="status">starting…</div>
+  </div>
+  <div>
+    <div class="card">
+      <strong>Pretend this is on screen</strong>
+      <div class="muted">The brain decides the same way it does when it's watching your Mac.</div>
+      <label for="app">Front app</label><input id="app" value="Google Chrome">
+      <label for="title">Window or tab title</label><input id="title" value="cute kittens compilation - YouTube">
+      <div class="row">
+        <div><label for="idle">Idle (seconds)</label><input id="idle" type="number" value="0"></div>
+        <div><label for="batt">Battery %</label><input id="batt" type="number" value="80"></div>
+        <div><label for="hour">Hour (0–23)</label><input id="hour" type="number" placeholder="now"></div>
+      </div>
+      <label for="song">Song playing (blank = none)</label><input id="song">
+      <button class="go" id="go">React</button>
+    </div>
+    <h2>Moods</h2>
+    <div class="moods" id="moods"></div>
+    <h2 id="gtitle">All faces</h2>
+    <div class="gallery" id="gallery"></div>
+  </div>
+</div>
+<script src="face.js"></script>
+<script>
+const screen = document.getElementById("screen"), ctx = screen.getContext("2d");
+ctx.scale(2, 2);
+const g = canvasGfx(ctx);
+let st = { id: faceId(0, 0, 1), bg: "#ffe9a8", deco: 0, anim: 0, caption: "hi!" };
+let poke = 0, look = [0, 0], online = false;
+const t0 = performance.now();
+
+function frame() {
+  const t = (performance.now() - t0) / 1000;
+  let s = st;
+  if (performance.now() - poke < 1200) s = { ...st, id: faceId(1, 1, 1), deco: 6, anim: 1, caption: "hehe!" };  // poked
+  drawFace(g, { ...s, lx: look[0], ly: look[1] }, t);
+  requestAnimationFrame(frame);
+}
+frame();
+
+// eyes follow the mouse a little (on the board they follow the tilt)
+addEventListener("mousemove", e => {
+  const r = screen.getBoundingClientRect();
+  look = [Math.max(-4, Math.min(4, (e.clientX - r.left - 86) / 40)), Math.max(-4, Math.min(4, (e.clientY - r.top - 140) / 50))];
+});
+screen.addEventListener("click", () => { poke = performance.now(); });
+
+function show(f) {
+  st = f;
+  document.getElementById("status").innerHTML =
+    `<b>${f.mood || "face"}</b> · face #${f.id}<br>${faceName(f.id)}`;
+  document.querySelectorAll(".gallery canvas").forEach(c => c.classList.toggle("on", +c.dataset.id === f.id));
+}
+
+// live feed from brain.py
+if (location.protocol.startsWith("http")) {
+  const es = new EventSource("/events");
+  es.onmessage = e => { online = true; show(JSON.parse(e.data)); };
+  es.onerror = () => { document.getElementById("status").innerHTML = `<span class="offline">brain.py isn't running</span>`; };
+  fetch("/state").then(r => r.json()).then(s => {
+    const box = document.getElementById("moods");
+    for (const m of s.moods) {
+      const b = document.createElement("button"); b.textContent = m;
+      b.onclick = () => post({ mood: m });
+      box.appendChild(b);
+    }
+  }).catch(() => {});
+}
+function post(body) {
+  return fetch("/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(r => r.json());
+}
+document.getElementById("go").onclick = () => {
+  const v = id => document.getElementById(id).value;
+  post({ app: v("app"), title: v("title"), idle: v("idle"), batt: v("batt"), hour: v("hour"), song: v("song"), charging: +v("batt") > 15 });
+};
+
+// every face, drawn once
+const gal = document.getElementById("gallery");
+document.getElementById("gtitle").textContent = `All ${FACE_COUNT} faces`;
+for (let id = 0; id < FACE_COUNT; id++) {
+  const c = document.createElement("canvas"); c.width = 172; c.height = 320; c.dataset.id = id; c.title = `#${id} ${faceName(id)}`;
+  const cg = canvasGfx(c.getContext("2d"));
+  const hue = ["#ffe9a8", "#d6f5f0", "#ffc4d8", "#dfe6ff", "#e6ddff", "#c8f5b0"][id % 6];
+  drawFace(cg, { id, bg: hue, deco: 0, anim: 0, caption: "" }, 1);
+  c.onclick = () => show({ id, bg: hue, deco: 0, anim: 0, caption: `#${id}`, mood: "gallery" });
+  gal.appendChild(c);
+}
+</script>
+</body>
+</html>

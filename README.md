@@ -1,15 +1,17 @@
 # Pip
 
-A tiny AI pet that lives in an 8-LED ring on your desk, and comes out onto your Mac's screen with its own pointer and
-a box of crayons.
+A small AI companion that lives in an 8-LED ring on your desk, and steps onto your Mac's screen with its own pointer and
+pen: a sharp, warm colleague at the next desk, not a cartoon.
 
 - **On the desk:** a face in a colour ring that blinks, looks around, gets hungry and bored, sleeps at night, purrs
   when you stroke it (turn the wheel) and munches when you feed it (tap the wheel). It talks and tells the time
   through a little speaker.
 - **On the laptop:** it watches which app and page you're on and changes mood: concentrating while you code,
   bopping to music, watching videos, dizzy when you flick between apps, asleep when you walk away.
-- **AI:** every few minutes (or when you hold the wheel 3 s) it takes one look at your screen with Gemini, flies its
-  own pointer over and draws on it: crayon stars, hearts and smileys, sometimes wild toddler marker scribbles.
+- **AI:** every few minutes (or when you hold the wheel 3 s) it takes one look at your screen with Gemini. If there's
+  something worth saying it flies its pointer over, annotates the exact thing (circles, underlines, arrows, notes) and
+  tells you in one or two natural sentences; if not, it keeps quiet. It remembers its last few looks, so it follows up
+  instead of repeating itself.
 - **Helpful when you're working:** it does the sums on your screen, fills in spreadsheet gaps, fixes slips in docs
   and tells you how to make slides look better, and puts the answers on your clipboard for Command-V.
 - **Uses the Mac's internet over USB** while plugged in (time, weather and its voice), so it needs no Wi-Fi of its own.

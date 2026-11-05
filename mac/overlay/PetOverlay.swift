@@ -31,13 +31,14 @@ final class PetView: NSView {
       guard let k = d["type"] as? String else { return nil }
       func n(_ s: String) -> Double { (d[s] as? NSNumber)?.doubleValue ?? 0 }
       return Mark(kind: k, x: n("x"), y: n("y"), x2: n("x2"), y2: n("y2"), r: n("r"), w: n("w"), h: n("h"), text: d["text"] as? String ?? "",
-                  crayon: ((j["marker"] as? Bool) == true ? MARKERS : CRAYONS).randomElement()!)
+                  crayon: colour)
     }
     marker = (j["marker"] as? Bool) == true; thinking = false
     drawn = []; current = marks.isEmpty ? -1 : 0; progress = 0; alphaAll = 1
     bubble = j["say"] as? String ?? ""; bubbleAt = t
     if let c = j["colour"] as? [Double], c.count == 3 { colour = NSColor(calibratedRed: c[0], green: c[1], blue: c[2], alpha: 1) }
     if let p = j["point"] as? [Double], p.count == 2 { petTarget = P(p[0], p[1]) }
+    for i in marks.indices { marks[i].crayon = colour }
     if current >= 0 { petTarget = startPoint(marks[0]) }
     fadeAt = t + 14 + Double(marks.count) * 2
   }
@@ -59,7 +60,7 @@ final class PetView: NSView {
       let c = P(m.x, m.y), rx = m.r * bounds.width, ry = m.h > 0 ? m.h * bounds.height : m.r * bounds.width * 0.8
       let steps = max(2, Int(60 * f))
       for i in 0...steps {
-        let a = Double(i) / 60 * 2.15 * .pi, wob = 1 + 0.04 * sin(a * 3)
+        let a = Double(i) / 60 * 2.08 * .pi, wob = 1 + 0.012 * sin(a * 3)
         let q = CGPoint(x: c.x + cos(a) * rx * wob, y: c.y - sin(a) * ry * wob)
         i == 0 ? p.move(to: q) : p.line(to: q); tip = q
       }
@@ -162,12 +163,11 @@ final class PetView: NSView {
       let d = hypot(pet.x - startPoint(m).x, pet.y - startPoint(m).y)
       if progress == 0 && d > 6 { petTarget = startPoint(m) }  // fly there first
       else {
-        progress = min(1, progress + (m.kind == "text" ? 0.05 : marker ? 0.04 : 0.025) * Double.random(in: 0.6...1.4))
+        progress = min(1, progress + (m.kind == "text" ? 0.08 : 0.035))
         if m.kind != "text" { petTarget = path(m, progress).1 } else { petTarget = P(m.x, m.y) }
         if progress >= 1 { drawn.append((m, 1)); current += 1; progress = 0; if current >= marks.count { current = -1 } }
       }
     } else if t > fadeAt {
-      if Int(t * 60) % 240 == 0 { home = CGPoint(x: bounds.width - 90 - Double.random(in: 0...160), y: bounds.height - 110 - Double.random(in: 0...90)) }
       petTarget = home
       alphaAll = max(0, alphaAll - 0.02)
       if alphaAll == 0 { drawn = []; bubble = "" }
@@ -190,18 +190,21 @@ final class PetView: NSView {
         p.lineWidth = 11; p.lineCapStyle = .round; p.lineJoinStyle = .round
         col.withAlphaComponent(0.72 * alphaAll).set(); p.stroke(); return
       }
-      p.lineWidth = 6; p.lineCapStyle = .round; p.lineJoinStyle = .round
-      NSColor.black.withAlphaComponent(0.3 * alphaAll).set(); let s = p.copy() as! NSBezierPath; s.lineWidth = 9; s.stroke()
-      col.withAlphaComponent(0.92 * alphaAll).set(); p.stroke()
-      let wax = p.copy() as! NSBezierPath; wax.lineWidth = 2  // crayon texture: a lighter streak down the middle
-      NSColor.white.withAlphaComponent(0.3 * alphaAll).set(); wax.stroke()
+      p.lineWidth = 3.5; p.lineCapStyle = .round; p.lineJoinStyle = .round
+      NSColor.black.withAlphaComponent(0.25 * alphaAll).set(); let s = p.copy() as! NSBezierPath; s.lineWidth = 6; s.stroke()
+      col.withAlphaComponent(0.95 * alphaAll).set(); p.stroke()
     }
     func note(_ m: Mark, _ f: Double) {
       let text = String(m.text.prefix(Int(Double(m.text.count) * f)))
-      let font = NSFont(name: "Chalkboard SE Bold", size: 26) ?? NSFont.systemFont(ofSize: 24, weight: .heavy)
-      let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: m.crayon.withAlphaComponent(alphaAll),
-        .strokeColor: NSColor.black.withAlphaComponent(0.6 * alphaAll), .strokeWidth: -3]
-      (text as NSString).draw(at: P(m.x, m.y), withAttributes: attrs)
+      if text.isEmpty { return }
+      let font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+      let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white.withAlphaComponent(alphaAll)]
+      let size = (text as NSString).size(withAttributes: attrs)
+      let o = P(m.x, m.y), r = NSRect(x: o.x, y: o.y, width: size.width + 18, height: size.height + 8)
+      NSColor(white: 0.1, alpha: 0.88 * alphaAll).set(); NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).fill()
+      let edge = NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7); edge.lineWidth = 1.5
+      m.crayon.withAlphaComponent(0.9 * alphaAll).set(); edge.stroke()
+      (text as NSString).draw(at: CGPoint(x: o.x + 9, y: o.y + 4), withAttributes: attrs)
     }
     for (m, _) in drawn { m.kind == "text" ? note(m, 1) : stroke(path(m, 1).0, m.crayon) }
     if current >= 0 && current < marks.count && progress > 0 {
@@ -209,8 +212,8 @@ final class PetView: NSView {
     }
 
     // the pet pointer: a little glowing ring with eyes, like the real one
-    let bob = current < 0 ? sin(t * 2.5) * 3 : 0
-    let c = CGPoint(x: pet.x, y: pet.y + bob), R = 17.0
+    let bob = current < 0 ? sin(t * 1.5) * 1.5 : 0
+    let c = CGPoint(x: pet.x, y: pet.y + bob), R = 14.0
     colour.withAlphaComponent(0.25).set(); NSBezierPath(ovalIn: NSRect(x: c.x - R - 8, y: c.y - R - 8, width: 2 * R + 16, height: 2 * R + 16)).fill()
     NSColor(white: 0.08, alpha: 0.92).set(); NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).fill()
     let rim = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)); rim.lineWidth = 3; colour.set(); rim.stroke()
@@ -231,7 +234,7 @@ final class PetView: NSView {
     // speech bubble
     if !bubble.isEmpty && alphaAll > 0 {
       let shown = String(bubble.prefix(Int((t - bubbleAt) * 40)))
-      let attrs: [NSAttributedString.Key: Any] = [.font: NSFont(name: "Chalkboard SE", size: 17) ?? NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.white.withAlphaComponent(alphaAll)]
+      let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.white.withAlphaComponent(alphaAll)]
       let box = (shown as NSString).boundingRect(with: NSSize(width: 300, height: 400), options: [.usesLineFragmentOrigin], attributes: attrs)
       var o = CGPoint(x: c.x + 28, y: c.y - box.height - 30)
       if o.x + box.width + 24 > bounds.width { o.x = c.x - box.width - 52 }

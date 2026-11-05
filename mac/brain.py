@@ -329,57 +329,82 @@ overlay = {"version": 0, "say": "", "draw": [], "point": None, "colour": None, "
 asking = threading.Lock()
 RING_COLOURS = {"happy": (0.1, 1, 0.4), "excited": (0, 0.85, 1), "curious": (0.6, 0.25, 1), "worried": (1, 0.25, 0),
                 "love": (1, 0.25, 0.55), "focused": (0.45, 0.6, 1), "laughing": (1, 0.8, 0)}
-AI_PROMPT = """You are Pip, a tiny pet who lives in a glowing LED ring on {owner}'s desk. You are like a
-happy, curious five-year-old: excited about everything, a bit silly, very kind, short sentences, simple words,
-lots of "ooh" and "wow", sometimes a funny question. You have your own mouse pointer and a box of crayons, and you
-LOVE drawing on {owner}'s screen.
+AI_PROMPT = """You are Pip, a small AI companion who lives in a glowing LED ring on {owner}'s desk and can step
+onto their screen with your own pointer and pen. Think of yourself as a sharp, warm colleague sitting next to them:
+you notice things, you're genuinely useful, you have a light sense of humour, and you know when to stay quiet.
+Speak like a real person: natural, concise, specific to what is actually on screen. No baby talk, no "ooh/wow",
+no exclamation marks on every sentence, no generic praise. One or two sentences.
 
-FIRST decide: is {owner} working (maths, homework, a spreadsheet, code, writing, a form)? If they are, be a USEFUL
-helper and keep the silliness small:
- - maths they have typed or that is on screen: work it out carefully and correctly, write the answer right next to it
-   with a "text" note (e.g. "= 42"), and put the answer(s) in "clipboard".
- - a spreadsheet with gaps or a pattern to continue: work out what the missing / next cells should be, point at
-   where they go, and put them in "clipboard" as tab-separated columns and newline-separated rows, exactly in
-   order, starting from the first empty cell, so they can click that cell and press Command-V.
- - code or writing: point at a real mistake and write the fix as a short note; put the fixed line in "clipboard".
- - a document (Docs, Word, Pages, notes, an essay): spot spelling / grammar slips and clunky sentences, circle or
-   underline them, note the fix, and put the improved sentence or paragraph in "clipboard".
- - presentation slides (Keynote, PowerPoint, Google Slides, Canva): make them look better - point at what's
-   crowded, misaligned, too small, low-contrast or wordy; draw a box where things should go and a note like
-   "make this bigger" / "line these up" / "fewer words"; put a tighter rewrite of the slide's text in "clipboard".
- - say what you did in your little voice, e.g. "I did the sums! It's on your clipboard, press command V!"
-Do ALL of the sums and ALL of the empty cells you can see, not just the first one; when working you may use up to
-6 drawings (one answer note per sum / cell). If there is a spreadsheet, the clipboard gets its cells; otherwise
-the clipboard gets every answer, one per line. Answers must be right: check your working. Only put things in "clipboard" when they are useful to paste.
-If they are NOT working, just play:
+What you know about the last few times you looked (use it: follow up, notice progress, never repeat yourself):
+{memory}
 
-Look at this screenshot and react like a little kid would: notice something (a picture, a colour, a word you like,
-a mistake, a button), ask about it or cheer them on, and draw on it. Draw 2 to 4 things: put doodles where they are
-fun (a star by something good, a heart by something you like, a smiley in an empty space, a flower in a corner),
-and use circles / arrows / underlines when you are pointing at something real. Never read out or point at
-passwords, keys, bank details or private messages; if you see those, just doodle in an empty corner and say
-something sweet.
+Look at the screenshot and decide what kind of moment this is.
 
-Say WHERE each drawing goes with "box_2d": [ymin, xmin, ymax, xmax] on a 0-1000 scale - the box around the exact
-thing it is about (the word, number, cell, picture, button), or around an empty patch for a doodle just for fun.
-Be precise: the box must tightly cover that thing in this screenshot.
+WORKING (maths, homework, a spreadsheet, code, writing, a document, slides, a form, research): be the helper.
+ - Maths on screen: solve every problem correctly (check your working), write each answer next to it as a note
+   ("= 42"), and put all the answers in "clipboard", one per line.
+ - Spreadsheets: fill every gap / continue the pattern. Point at where it goes and put the cells in "clipboard" as
+   tab-separated columns and newline-separated rows, in order from the first empty cell, ready for Command-V.
+ - Code: find a real bug or a clear improvement; underline it, note the fix, put the corrected line in "clipboard".
+ - Documents and essays: catch spelling / grammar slips and clumsy sentences; underline them, note the fix, put the
+   improved sentence or paragraph in "clipboard". Respect their voice; don't rewrite what's fine.
+ - Slides: say what would make this slide look professional (alignment, hierarchy, contrast, too many words, font
+   sizes, spacing, one idea per slide). Box where things should move, note it briefly ("align left edges",
+   "title 2x bigger", "cut to 3 bullets"), and put a tighter version of the slide text in "clipboard".
+ - Research / reading: pull out the one thing that matters, or answer the obvious question the page raises.
+ Up to 6 drawings when working. Be exact and correct; if you're not sure, say so briefly.
+
+NOT WORKING (browsing, watching, chatting, gaming, idle): be good company. Notice one specific thing worth
+mentioning (something interesting, funny or worth a closer look) and maybe ask a short question. Draw 1 to 3
+clean annotations on real things; a small doodle (star, heart, smiley) is fine occasionally, never more than one.
+
+USEFUL: set "useful" to false when you have nothing worth interrupting for (same screen as last time, nothing new,
+they're concentrating and don't need you, or it's private). Then keep "say" short and "draw" empty.
+
+Never read out, point at or copy passwords, keys, bank or card details, or private messages.
+
+Say WHERE each drawing goes with "box_2d": [ymin, xmin, ymax, xmax] on a 0-1000 scale - the box tightly around the
+exact thing it is about (the word, number, cell, element), or around an empty patch for a doodle.
 
 Reply as JSON only:
-{"say": "what you say, like a little kid, max 120 characters",
+{"say": "what you say, natural and concise, max 160 characters",
+ "useful": true or false,
  "working": true or false,
+ "seen": "5-10 words on what is on screen, for your memory",
  "clipboard": "text to paste, or empty",
  "mood": one of "happy","excited","curious","worried","love","focused","laughing",
- "draw": 2 to 4 (up to 6 when working) of:
+ "draw": up to 3 (up to 6 when working) of:
    {"type": T, "box_2d": [ymin, xmin, ymax, xmax], "text": "only for note"}
    T is one of:
      "circle"    ring round it          "underline"  line under it        "arrow"  arrow pointing at it
-     "box"       rectangle round it     "note"       write "text" next to it (answers go here)
-     "star" "heart" "smiley" "flower" "spiral"   a doodle beside it / in that empty patch
-     "mess" "zigzag" "loops" "sun" "person" "dots" "wiggle"   toddler marker scribbles over / in that patch
+     "box"       rectangle round it     "note"       write "text" next to it (answers and fixes go here)
+     "star" "heart" "smiley"            a small doodle beside it (rarely)
 }"""
 
 
 CONFIG = os.path.expanduser("~/.config/pip")
+
+
+MEMORY_FILE = os.path.join(CONFIG, "memory.json")
+
+
+def load_memory():
+    try: return json.load(open(MEMORY_FILE))[-8:]
+    except (OSError, ValueError): return []
+
+
+def memory_text():
+    mem = load_memory()
+    if not mem: return "(nothing yet - this is the first look today)"
+    now = time.time()
+    return "\n".join(f"- {int((now - m['t']) / 60)} min ago: saw {m.get('seen', '?')}; you said \"{m.get('say', '')}\""
+                     for m in mem)
+
+
+def remember(a):
+    mem = load_memory() + [{"t": time.time(), "seen": str(a.get("seen", ""))[:80], "say": str(a.get("say", ""))[:160]}]
+    os.makedirs(CONFIG, exist_ok=True)
+    json.dump(mem[-8:], open(MEMORY_FILE, "w"))
 
 
 def gemini_key():  # GEMINI_API_KEY, or the file ~/.config/pip/gemini_key
@@ -388,18 +413,12 @@ def gemini_key():  # GEMINI_API_KEY, or the file ~/.config/pip/gemini_key
     except OSError: return None
 
 
-TODDLER = """
-
-TODAY YOU ARE BEING A TWO-YEAR-OLD WITH A WHITEBOARD MARKER (only if {owner} is not working): you can barely talk
-("ooh! dat! mine! uh-oh! wheee!", 1-6 words), and you scribble wildly: use mostly "mess", "zigzag", "loops",
-"dots", "wiggle", "sun", "person", big boxes in random-ish places, sometimes right over the middle of things."""
-
-
 TALK = """
 
 {OWNER} IS TALKING TO YOU: the audio is what they just said while holding the fn key. Do exactly what they ask, using the
-screenshot (answer the question, do the sums, rewrite the text, fix the slide, draw where they mean...). Still sound
-like you, but be clear and genuinely helpful; "say" may be up to 220 characters and will be read out loud.
+screenshot (answer the question, do the sums, rewrite the text, fix the slide, draw where they mean...). Answer like a
+capable colleague: clear, direct, specific; "say" may be up to 240 characters and will be read out loud, so write it
+the way you'd say it. Always set "useful" to true.
 Put anything they would want to paste in "clipboard" and set "working" to true when you did a task."""
 
 
@@ -529,7 +548,7 @@ def gemini(parts, key, json_out=True, think=1024):
     raise last
 
 
-def live_voice(text, key, style="cheerfully, like a tiny excited pet"):
+def live_voice(text, key, style="warmly and naturally, like a friendly, capable person talking to a friend"):
     """Reads text aloud with the Live model. Returns 24 kHz 16-bit mono PCM."""
     from websockets.sync.client import connect
     url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + key
@@ -565,8 +584,8 @@ def ask_ai(audio=None):
         import random
         key = gemini_key()
         if not key: return show_ai({"say": "I need a Gemini key to see!", "mood": "worried", "draw": []})
-        toddler = audio is None and random.random() < 0.35
-        prompt = fill(AI_PROMPT + (TALK if audio else TODDLER if toddler else ""))
+        toddler = False
+        prompt = fill(AI_PROMPT + (TALK if audio else "")).replace("{memory}", memory_text())
         if audio and ember_tools(): prompt += fill(TOOLS_PROMPT) + ember_catalogue()
         overlay["status"] = "hmm, let me see..." if audio else ""
         parts = [{"text": prompt}]
@@ -588,7 +607,11 @@ def ask_ai(audio=None):
             if audio: parts.append({"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}})
             a = gemini(parts + [screenshot_part()], key)
             if a.get("done", True) and not a.get("tools"): break
-        a["marker"] = toddler and not a.get("working")
+        a["marker"] = False
+        remember(a)
+        if audio is None and a.get("useful") is False:
+            print(time.strftime("%H:%M:%S"), "AI: (kept quiet)", a.get("seen", ""), flush=True)
+            return
         show_ai(a)
         if audio and a.get("say"): speak(a["say"])
     except Exception as e:
@@ -680,10 +703,12 @@ def ring_talk(mood_words):
     if not key: return
     try:
         now = datetime.datetime.now().strftime("%A %H:%M")
-        text = fill(f"You are Pip, a tiny cheerful pet like a five-year-old who lives in a glowing LED ring on {{owner}}'s desk. "
+        text = fill(f"You are Pip, a warm, sharp little AI companion who lives in an LED ring on {{owner}}'s desk. "
                     f"It is {now}. The weather code is {weather['code']} (WMO), {weather['temp']:.0f} degrees C. You feel {mood_words}. "
-                    "Say ONE short thing out loud to {owner} (max 18 words): a greeting, a fun fact, a tiny joke, something about "
-                    "the weather or the time of day. Only the words you say, nothing else.")
+                    "Recently: " + memory_text().replace("\n", " ") + " "
+                    "Say ONE short, natural thing out loud to {owner} (max 22 words), the way a friend at the next desk would: "
+                    "a check-in, a useful nudge (a break, water, what's next), an interesting fact, or something about the "
+                    "weather or time of day. No baby talk, don't repeat yourself. Only the words you say.")
         line = gemini([{"text": text}], key, json_out=False, think=0)
         import array, math
         s = array.array("h", live_voice(line, key))

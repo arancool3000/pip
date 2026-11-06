@@ -57,6 +57,23 @@ const int EYE_L = 7, EYE_R = 1, MOUTH[3] = {3, 4, 5};
 Adafruit_NeoPixel ring(N, RING, NEO_GRB + NEO_KHZ800);
 Preferences prefs;
 
+// ---------- animation state (the animations themselves are further down) ----------
+enum Anim { A_NONE, A_YAWN, A_SNEEZE, A_WIGGLE, A_NOD, A_SHIVER, A_STRETCH, A_RAINBOW, A_HEART, A_CHOMP, A_THINK,
+            A_LISTEN, A_PING, A_CLOCK, A_LIGHTNING, A_SPIN, A_DOUBLEBLINK, A_HOLD, A_CANCEL, A_ZZZ, A_SURPRISE,
+            A_DISCO, A_CONFETTI, A_FIREWORK, A_WAVE, A_TWINKLE, A_HEARTEYES, A_KISS, A_LAUGH, A_GIGGLE, A_CRY, A_ANGRY,
+            A_SCARED, A_CURIOUS, A_PEEK, A_WINK, A_EYEROLL, A_TYPING, A_CHEER, A_CLAP, A_FACEPALM, A_SHY, A_PROUD,
+            A_HELLO, A_BOW, A_SLEEPYNOD, A_ALARM, A_LOWBATT, A_CHARGE, A_UNPLUG, A_LOADING, A_SUCCESS, A_ERROR,
+            A_MAIL, A_CALL, A_FLASH, A_DOWNLOAD, A_AWAY, A_BACK, A_HEADBANG };
+// dancing is a mode, not a one-off: it runs for the whole song, on top of the face
+bool dancing = false; float bpm = 118; uint32_t danceStart = 0; int danceStyle = 0;
+float beatPhase() { return fmodf((millis() - danceStart) * bpm / 60000.0f, 1); }  // 0..1 through each beat
+int beatNo() { return (int)((millis() - danceStart) * bpm / 60000.0f); }
+Anim anim = A_NONE; uint32_t animStart = 0, animLen = 0; float animArg = 0;
+void startAnim(Anim a, uint32_t ms, float arg = 0) { anim = a; animStart = millis(); animLen = ms; animArg = arg; }
+bool animating() { return anim != A_NONE && millis() - animStart < animLen; }
+float animF() { return animating() ? (millis() - animStart) / (float)animLen : 1; }
+
+
 // ---------- sound ----------
 void speakerIdle() {
   pinMode(SPK_A, OUTPUT); pinMode(SPK_B, OUTPUT);
@@ -334,6 +351,9 @@ int screenLook = -1;          // -1 = no laptop
 uint32_t screenAt = 0;
 void playSound(int s);
 bool screenLive();
+int readWheel();
+bool asleepNow();
+extern uint32_t lastTouch;
 
 void readSerial() {  // "T<unix time>" from settime.py, "M <mood>" from brain.py
   if (!Serial.available()) return;
@@ -345,6 +365,48 @@ void readSerial() {  // "T<unix time>" from settime.py, "M <mood>" from brain.py
     return;
   }
   if (line.startsWith("S sound ")) { soundOn = line.endsWith("1"); return; }
+  if (line.startsWith("E ")) {  // something you did on the Mac
+    String e = line.substring(2); int sp = e.indexOf(' '); String arg = sp > 0 ? e.substring(sp + 1) : ""; if (sp > 0) e = e.substring(0, sp);
+    lastTouch = millis();
+    if (e == "song_start") { dancing = true; bpm = arg.length() ? arg.toFloat() : 118; danceStart = millis(); animArg = random(5); startAnim(A_CHEER, 900); if (!asleepNow()) chirpHappy(); }
+    else if (e == "song_stop") { dancing = false; startAnim(A_BOW, 1000); }
+    else if (e == "typing") startAnim(A_TYPING, 4000);
+    else if (e == "typing_stop") { if (anim == A_TYPING) anim = A_NONE; }
+    else if (e == "app_switch") startAnim(A_CURIOUS, 900, random(2) ? 1 : -1);
+    else if (e == "charging") { startAnim(A_CHARGE, 1600); if (!asleepNow()) slide(800, 1800, 150); }
+    else if (e == "unplugged") startAnim(A_UNPLUG, 900);
+    else if (e == "low_batt") { startAnim(A_LOWBATT, 2500); if (!asleepNow()) chirpSad(); }
+    else if (e == "away") startAnim(A_AWAY, 2500);
+    else if (e == "back") { startAnim(A_BACK, 1200); if (!asleepNow()) chirpHappy(); }
+    else if (e == "screenshot") startAnim(A_FLASH, 300);
+    else if (e == "download") startAnim(A_DOWNLOAD, 1200);
+    else if (e == "success") { startAnim(A_SUCCESS, 1200); if (!asleepNow()) chirpHappy(); }
+    else if (e == "error") { startAnim(A_ERROR, 1400); if (!asleepNow()) chirpSad(); }
+    else if (e == "mail") startAnim(A_MAIL, 900);
+    else if (e == "call") startAnim(A_CALL, 1600);
+    else if (e == "celebrate") { startAnim(A_CONFETTI, 2000); if (!asleepNow()) chirpHappy(); }
+    else if (e == "laugh") startAnim(A_LAUGH, 1500);
+    else if (e == "love") startAnim(A_HEARTEYES, 2000);
+    else if (e == "worried") startAnim(A_CRY, 1800);
+    else if (e == "angry") startAnim(A_ANGRY, 1500);
+    else if (e == "scared") startAnim(A_SCARED, 1200);
+    else if (e == "dizzy") startAnim(A_EYEROLL, 1200);
+    else if (e == "facepalm") startAnim(A_FACEPALM, 1500);
+    else if (e == "clap") startAnim(A_CLAP, 1200);
+    else if (e == "firework") startAnim(A_FIREWORK, 1000, random(100) / 100.0f);
+    else if (e == "disco") startAnim(A_DISCO, 2000);
+    else if (e == "hello") startAnim(A_HELLO, 1300);
+    else if (e == "alarm") startAnim(A_ALARM, 1500);
+    return;
+  }
+  if (line.startsWith("A ")) {  // what the Mac side is doing: listening (fn held), thinking, done
+    String s = line.substring(2);
+    if (s == "listen") startAnim(A_LISTEN, 60000);
+    else if (s == "think") startAnim(A_THINK, 60000, 12);
+    else if (s == "done") { if (anim == A_THINK || anim == A_LISTEN) { anim = A_NONE; startAnim(A_PING, 500); } }
+    else if (s == "quiet") { if (anim == A_THINK || anim == A_LISTEN) anim = A_NONE; }
+    return;
+  }
   if (line.startsWith("V ")) {  // "V <bytes>" then that many bytes of 12 kHz 8-bit voice
     int len = line.substring(2).toInt();
     File f = LittleFS.open("/say.raw", "w");
@@ -373,7 +435,7 @@ void readSerial() {  // "T<unix time>" from settime.py, "M <mood>" from brain.py
 
 // ---------- the pet ----------
 float food = 80, fun = 80;  // 0..100, go down over time
-uint32_t lastTouch = 0, lastCall = 0, excitedUntil = 0, crossUntil = 0;
+uint32_t lastTouch = 0; uint32_t lastCall = 0, excitedUntil = 0, crossUntil = 0;
 float swirl = -1;            // where the stroking light is, -1 = none
 uint32_t swirlAt = 0;
 float lookX = 0, lookTarget = 0;
@@ -400,17 +462,332 @@ void moodColour(Mood m, float &r, float &g, float &b) {
   }
 }
 
+// ---------- the drawing engine ----------
+// Every frame the face is built up in px[] (any amount of light per LED, in float), then gamma-corrected and shown.
+// Animations are events with a start time and a length; drawAnim() layers them over the face at fraction f = 0..1,
+// so nothing blocks: the wheel, the buttons and the Mac keep working while anything plays.
 float px[N][3];
 int rot = 0;  // turns the face round the ring; hold the wheel and turn to change it
+uint8_t gammaT[256];
+int volume = 80;  // 10..100, turn the wheel while it talks
+
 void add(int i, float r, float g, float b) { i = ((i + rot) % N + N) % N; px[i][0] += r; px[i][1] += g; px[i][2] += b; }
 void addAt(float pos, float r, float g, float b) {
   pos = fmodf(pos + N * 4, N);
   int a = (int)pos; float f = pos - a;
   add(a, r * (1 - f), g * (1 - f), b * (1 - f)); add(a + 1, r * f, g * f, b * f);
 }
-void show() {
-  for (int i = 0; i < N; i++) ring.setPixelColor(i, min(255, (int)px[i][0]), min(255, (int)px[i][1]), min(255, (int)px[i][2]));
+void addAll(float r, float g, float b) { for (int i = 0; i < N; i++) add(i, r, g, b); }
+void hsv(float h, float s, float v, float &r, float &g, float &b) {  // h 0..1
+  h = fmodf(h + 10, 1) * 6; int i = (int)h; float f = h - i, p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+  switch (i) { case 0: r = v; g = t; b = p; break; case 1: r = q; g = v; b = p; break; case 2: r = p; g = v; b = t; break;
+               case 3: r = p; g = q; b = v; break; case 4: r = t; g = p; b = v; break; default: r = v; g = p; b = q; }
+  r *= 255; g *= 255; b *= 255;
+}
+float easeInOut(float x) { return x < 0.5f ? 2 * x * x : 1 - powf(-2 * x + 2, 2) / 2; }
+float easeOut(float x) { return 1 - powf(1 - x, 3); }
+float bounce(float x) { return sinf(x * 3.14159f); }  // 0 -> 1 -> 0
+float lastBright = BRIGHT;
+void show(float level = BRIGHT) {
+  lastBright += (level - lastBright) * 0.1f;  // brightness never jumps
+  ring.setBrightness((int)lastBright);
+  for (int i = 0; i < N; i++)
+    ring.setPixelColor(i, gammaT[min(255, (int)px[i][0])], gammaT[min(255, (int)px[i][1])], gammaT[min(255, (int)px[i][2])]);
   ring.show(); memset(px, 0, sizeof(px));
+}
+
+// ---------- animations ----------
+bool faceHidden() {  // these animations take the whole ring
+  return animating() && (anim == A_RAINBOW || anim == A_CLOCK || anim == A_SPIN || anim == A_THINK || anim == A_HOLD || anim == A_CANCEL
+                         || anim == A_DISCO || anim == A_FIREWORK || anim == A_WAVE || anim == A_CHEER || anim == A_ALARM
+                         || anim == A_CHARGE || anim == A_UNPLUG || anim == A_LOADING || anim == A_SUCCESS || anim == A_ERROR
+                         || anim == A_FLASH || anim == A_DOWNLOAD || anim == A_CONFETTI);
+}
+
+void drawEyes(float e, float l, float r_, float w) {  // e open 0..1, l/r per-eye brightness, w white level
+  add(EYE_L, w * e * l, w * e * l, w * e * l);
+  add(EYE_R, w * e * r_, w * e * r_, w * e * r_);
+}
+
+// the weather lives in the background, faint, behind the face
+void drawWeather(uint32_t now) {
+  if (weatherCode < 0 || screenLive()) return;
+  const char *w = weatherWords();
+  if (!strcmp(w, "rainy")) {        // drops running down both sides
+    for (int k = 0; k < 2; k++) { float p = fmodf((now / 900.0f) + k * 0.5f, 1); addAt(EYE_L + 1 + p * 2, 0, 20 * (1 - p), 60 * (1 - p)); addAt(EYE_R - 1 - p * 2, 0, 20 * (1 - p), 60 * (1 - p)); }
+  } else if (!strcmp(w, "snowy")) { // slow sparkles drifting
+    for (int k = 0; k < 3; k++) { float p = fmodf(now / 2200.0f + k * 0.33f, 1); float v = bounce(p) * 50; addAt(k * 2.7f + p * 1.5f, v, v, v + 20); }
+  } else if (!strcmp(w, "sunny")) { // warm glow breathing at the top
+    float v = 18 + 10 * sinf(now / 1300.0f); add(0, v, v * 0.7f, 0); add(1, v * 0.5f, v * 0.35f, 0); add(7, v * 0.5f, v * 0.35f, 0);
+  } else if (!strcmp(w, "stormy")) {
+    addAll(6, 0, 12);
+    if (random(1200) == 0 && !animating()) startAnim(A_LIGHTNING, 350);
+  }
+  if (tempC < 4 && random(900) == 0 && !animating()) startAnim(A_SHIVER, 700);
+}
+
+void drawAnim(uint32_t now, float r, float g, float b) {
+  if (!animating()) { if (anim != A_NONE) anim = A_NONE; return; }
+  float f = animF();
+  switch (anim) {
+    case A_YAWN: {  // mouth opens wide and slow, eyes close
+      float o = bounce(easeInOut(f));
+      for (int i = 0; i < 3; i++) add(MOUTH[i], r * o, g * o, b * o);
+      add(2, r * o * 0.4f, g * o * 0.4f, b * o * 0.4f); add(6, r * o * 0.4f, g * o * 0.4f, b * o * 0.4f);
+      break; }
+    case A_SNEEZE: {  // builds up... then everything flashes out
+      if (f < 0.7f) { float v = f / 0.7f; drawEyes(1 - v * 0.8f, 1, 1, 255); add(MOUTH[1], r * v, g * v, b * v); }
+      else { float v = 1 - (f - 0.7f) / 0.3f; addAll(255 * v, 255 * v, 255 * v); }
+      break; }
+    case A_WIGGLE: {  // the whole face shakes side to side
+      float s = sinf(f * 25) * (1 - f) * 0.7f;
+      addAt(EYE_L + s, 255, 255, 255); addAt(EYE_R + s, 255, 255, 255);
+      for (int i = 0; i < 3; i++) addAt(MOUTH[i] + s, r, g, b);
+      break; }
+    case A_NOD: {  // eyes dip down twice
+      float d = fabsf(sinf(f * 6.28f)) * 0.8f;
+      addAt(EYE_L - d, 255, 255, 255); addAt(EYE_R + d, 255, 255, 255);
+      for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      break; }
+    case A_SHIVER: {  // quick cold tremble, blue tinge
+      float s = sinf(f * 60) * 0.3f;
+      addAt(EYE_L + s, 200, 220, 255); addAt(EYE_R + s, 200, 220, 255);
+      add(MOUTH[1], 120, 160, 255); addAll(0, 0, 15);
+      break; }
+    case A_STRETCH: {  // light spreads out from the mouth to the eyes and back
+      float o = bounce(easeInOut(f));
+      for (int i = 0; i < 3; i++) add(MOUTH[i], r * 0.6f, g * 0.6f, b * 0.6f);
+      addAt(MOUTH[0] - o * 2, r * o, g * o, b * o); addAt(MOUTH[2] + o * 2, r * o, g * o, b * o);
+      drawEyes(1, 1, 1, 255 * (0.3f + 0.7f * (1 - o)));
+      break; }
+    case A_RAINBOW: {  // the ring spins through every colour
+      for (int i = 0; i < N; i++) { float rr, gg, bb; hsv(f * 2 + i / (float)N, 1, 1, rr, gg, bb); add(i, rr, gg, bb); }
+      break; }
+    case A_HEART: {  // a pink heartbeat: two thumps per cycle
+      float ph = fmodf(f * animArg, 1), v = ph < 0.15f ? bounce(ph / 0.15f) : ph < 0.4f ? bounce((ph - 0.25f) / 0.15f) * 0.7f : 0;
+      if (ph > 0.25f && ph < 0.4f) v = bounce((ph - 0.25f) / 0.15f) * 0.7f; else if (ph >= 0.15f) v = 0;
+      addAll(255 * v * 0.5f, 40 * v, 120 * v * 0.5f);
+      break; }
+    case A_CHOMP: {  // eating: mouth corners and middle alternate, orange crumbs
+      int k = (int)(f * 6) % 2;
+      add(MOUTH[0], 255 * k, 180 * k, 0); add(MOUTH[2], 255 * k, 180 * k, 0); add(MOUTH[1], 255 * !k, 180 * !k, 0);
+      drawEyes(0.6f + 0.4f * k, 1, 1, 255);
+      break; }
+    case A_THINK: {  // three dots chase round while the Mac is thinking
+      for (int k = 0; k < 3; k++) { float p = f * animArg + k * 0.8f; addAt(p, 60 / (k + 1), 160 / (k + 1), 255 / (k + 1)); }
+      break; }
+    case A_LISTEN: {  // soft cyan breathing, eyes wide and steady: it's listening to you
+      float v = 0.5f + 0.5f * sinf(now / 250.0f);
+      drawEyes(1, 1, 1, 255); addAll(0, 25 * v, 35 * v); add(MOUTH[1], 0, 120, 160);
+      break; }
+    case A_PING: {  // one bright ripple out from the top
+      float d = easeOut(f) * 4;
+      addAt(0 + d, 255 * (1 - f), 255 * (1 - f), 255 * (1 - f)); addAt(0 - d, 255 * (1 - f), 255 * (1 - f), 255 * (1 - f));
+      break; }
+    case A_CLOCK: {  // telling the time: blue hour hand, green minute hand sweep into place, then hold
+      struct tm t; if (!haveTime(t)) break;
+      float sweep = easeOut(min(1.0f, f * 3));
+      float h = ((t.tm_hour % 12) + t.tm_min / 60.0f) * N / 12, m = t.tm_min * N / 60;
+      for (int i = 0; i < N; i++) add(i, 4, 4, 6);
+      addAt(h * sweep, 0, 0, 255); addAt(m * sweep, 0, 255, 0); add(0, 60, 60, 60);
+      break; }
+    case A_LIGHTNING: {  // two flashes then dark
+      float v = f < 0.1f ? 1 : f < 0.25f ? 0 : f < 0.32f ? 0.8f : 0;
+      addAll(255 * v, 255 * v, 255 * v);
+      break; }
+    case A_SPIN: {  // a comet in the given hue
+      float rr, gg, bb; hsv(animArg, 1, 1, rr, gg, bb);
+      float p = f * N * 3;
+      for (int k = 0; k < 4; k++) addAt(p - k * 0.6f, rr / (k + 1), gg / (k + 1), bb / (k + 1));
+      break; }
+    case A_DOUBLEBLINK: {
+      bool open = fmodf(f * 2, 1) > 0.45f;
+      drawEyes(open ? 1 : 0.08f, 1, 1, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      break; }
+    case A_HOLD: {  // the ring fills up while you hold a button, so you know when to let go
+      float fill = f * N;
+      for (int i = 0; i < N; i++) { float v = constrain(fill - i, 0, 1); add(i, 255 * v * (animArg ? 1 : 0.3f), 200 * v, 255 * v * 0.3f); }
+      break; }
+    case A_CANCEL: {  // a quick red wipe: stopped
+      float v = 1 - f; addAll(255 * v, 30 * v, 30 * v);
+      break; }
+    case A_ZZZ: {  // asleep: a Z drifts up from the mouth over the right eye and fades
+      float p = easeOut(f) * 3, v = 1 - f;
+      addAt(MOUTH[2] + p, 30 * v, 30 * v, 90 * v);
+      break; }
+    case A_SURPRISE: {  // eyes pop, mouth small, brief
+      drawEyes(1, 1.3f, 1.3f, 255); add(MOUTH[1], r, g, b);
+      break; }
+    case A_DISCO: {  // random LEDs flash in random colours
+      for (int i = 0; i < N; i++) if (random(3) == 0) { float rr, gg, bb; hsv(random(100) / 100.0f, 1, 1, rr, gg, bb); add(i, rr, gg, bb); }
+      break; }
+    case A_CONFETTI: {  // coloured bits popping everywhere, thinning out
+      for (int i = 0; i < N; i++) if (random(100) < 40 * (1 - f)) { float rr, gg, bb; hsv((i * 37 + beatNo()) % 100 / 100.0f, 1, 1, rr, gg, bb); add(i, rr, gg, bb); }
+      break; }
+    case A_FIREWORK: {  // a burst from the top, spreading both ways and fading
+      float d = easeOut(f) * N / 2, v = 1 - f; float rr, gg, bb; hsv(animArg, 0.8f, 1, rr, gg, bb);
+      addAt(0 + d, rr * v, gg * v, bb * v); addAt(0 - d, rr * v, gg * v, bb * v);
+      if (f < 0.15f) add(0, 255, 255, 255);
+      break; }
+    case A_WAVE: {  // a smooth wave of the mood colour going round twice
+      for (int i = 0; i < N; i++) { float v = 0.5f + 0.5f * sinf((i / (float)N - f * 2) * 6.28f); add(i, r * v, g * v, b * v); }
+      break; }
+    case A_TWINKLE: {  // soft white sparkles, like stars
+      for (int i = 0; i < N; i++) { float v = powf(0.5f + 0.5f * sinf(now / 150.0f + i * 1.7f), 6) * 120; add(i, v, v, v); }
+      drawEyes(1, 1, 1, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r * 0.7f, g * 0.7f, b * 0.7f);
+      break; }
+    case A_HEARTEYES: {  // eyes go pink and pulse
+      float v = 0.6f + 0.4f * sinf(now / 120.0f);
+      add(EYE_L, 255 * v, 40 * v, 120 * v); add(EYE_R, 255 * v, 40 * v, 120 * v);
+      for (int i = 0; i < 3; i++) add(MOUTH[i], 255, 60, 140);
+      break; }
+    case A_KISS: {  // mouth puckers to one LED, then a pink dot floats up and away
+      if (f < 0.4f) { add(MOUTH[1], 255, 80, 160); drawEyes(0.3f, 1, 1, 255); }
+      else { float p = (f - 0.4f) / 0.6f; addAt(MOUTH[1] + p * 4, 255 * (1 - p), 80 * (1 - p), 160 * (1 - p)); drawEyes(1, 1, 1, 255); }
+      break; }
+    case A_LAUGH: {  // the whole face bounces fast, mouth wide open and shut
+      float bob = fabsf(sinf(f * 40)) * 0.6f; bool open = fmodf(f * 8, 1) < 0.5f;
+      addAt(EYE_L + bob, 255, 255, 255); addAt(EYE_R - bob, 255, 255, 255);
+      for (int i = 0; i < 3; i++) if (open || i == 1) addAt(MOUTH[i] + bob * (i - 1), r, g, b);
+      add(2, r * 0.3f, g * 0.3f, b * 0.3f); add(6, r * 0.3f, g * 0.3f, b * 0.3f);
+      break; }
+    case A_GIGGLE: {  // tiny quick shakes, eyes squeezed
+      float s = sinf(f * 50) * 0.25f;
+      addAt(EYE_L + s, 255 * 0.4f, 255 * 0.4f, 255 * 0.4f); addAt(EYE_R + s, 255 * 0.4f, 255 * 0.4f, 255 * 0.4f);
+      for (int i = 0; i < 3; i++) addAt(MOUTH[i] + s, r, g, b);
+      break; }
+    case A_CRY: {  // blue tears run from the eyes down the sides, mouth wobbles
+      float p = fmodf(f * 3, 1);
+      addAt(EYE_L - 1 - p * 2, 0, 60 * (1 - p), 255 * (1 - p)); addAt(EYE_R + 1 + p * 2, 0, 60 * (1 - p), 255 * (1 - p));
+      drawEyes(0.5f, 1, 1, 200); float w = 0.5f + 0.5f * sinf(now / 90.0f); add(MOUTH[0], 60 * w, 60 * w, 255 * w); add(MOUTH[2], 60 * (1 - w), 60 * (1 - w), 255 * (1 - w));
+      break; }
+    case A_ANGRY: {  // red pulses, narrowed eyes, mouth a hard line
+      float v = 0.5f + 0.5f * sinf(now / 110.0f);
+      addAll(60 * v, 0, 0); drawEyes(0.5f, 1, 1, 255); add(MOUTH[1], 255, 0, 0);
+      break; }
+    case A_SCARED: {  // dim, shaking, eyes huge
+      float s = sinf(f * 70) * 0.2f;
+      addAt(EYE_L + s, 255, 255, 255); addAt(EYE_R + s, 255, 255, 255); add(MOUTH[1], r * 0.4f, g * 0.4f, b * 0.4f);
+      break; }
+    case A_CURIOUS: {  // head tilt: the face slides a little to one side and one eye brightens
+      float t_ = easeInOut(min(1.0f, f * 2)) * 0.6f * (animArg >= 0 ? 1 : -1);
+      addAt(EYE_L + t_, 255, 255, 255); addAt(EYE_R + t_, 160, 160, 160);
+      for (int i = 0; i < 3; i++) addAt(MOUTH[i] + t_, r, g, b);
+      break; }
+    case A_PEEK: {  // eyes shut... one opens slowly... then both
+      float a = f < 0.4f ? 0.08f : f < 0.8f ? easeOut((f - 0.4f) / 0.4f) : 1, b_ = f < 0.8f ? 0.08f : easeOut((f - 0.8f) / 0.2f);
+      add(EYE_L, 255 * a, 255 * a, 255 * a); add(EYE_R, 255 * b_, 255 * b_, 255 * b_); add(MOUTH[1], r, g, b);
+      break; }
+    case A_WINK: {
+      drawEyes(1, f < 0.6f ? 0.08f : 1, 1, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      break; }
+    case A_EYEROLL: {  // both eyes travel up over the top and back
+      float p = sinf(f * 3.14159f) * 1.2f;
+      addAt(EYE_L + p, 255, 255, 255); addAt(EYE_R - p, 255, 255, 255); add(MOUTH[1], r, g, b);
+      break; }
+    case A_TYPING: {  // typing along with you: little dots pop at the mouth in a quick rhythm
+      int k = (int)(now / 90) % 3; add(MOUTH[k], r, g, b); add(MOUTH[(k + 1) % 3], r * 0.3f, g * 0.3f, b * 0.3f);
+      drawEyes(0.8f, 1, 1, 255);
+      break; }
+    case A_CHEER: {  // the ring pumps three times through the rainbow
+      float v = powf(bounce(fmodf(f * 3, 1)), 0.6f);
+      for (int i = 0; i < N; i++) { float rr, gg, bb; hsv(i / (float)N + f, 1, 1, rr, gg, bb); add(i, rr * v, gg * v, bb * v); }
+      break; }
+    case A_CLAP: {  // left and right halves flash alternately
+      bool l = fmodf(f * 6, 1) < 0.5f;
+      for (int i = 0; i < N; i++) { bool left = ((i + rot) % N) >= N / 2; if (left == l) add(i, 255, 220, 120); }
+      break; }
+    case A_FACEPALM: {  // eyes close, everything dims, a slow sigh
+      float v = 1 - bounce(f) * 0.7f;
+      drawEyes(0.08f, 1, 1, 255); add(MOUTH[1], r * v, g * v, b * v);
+      break; }
+    case A_SHY: {  // dims, pink cheeks pulse, eyes look down
+      float v = 0.5f + 0.5f * sinf(now / 300.0f);
+      drawEyes(0.6f, 1, 1, 180); add(2, 255 * v * 0.6f, 60 * v, 100 * v * 0.6f); add(6, 255 * v * 0.6f, 60 * v, 100 * v * 0.6f); add(MOUTH[1], r, g, b);
+      break; }
+    case A_PROUD: {  // a glow swells out from the mouth, chin up
+      float o = bounce(easeInOut(f));
+      drawEyes(1, 1, 1, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      addAt(MOUTH[0] - o * 1.5f, r * o * 0.6f, g * o * 0.6f, b * o * 0.6f); addAt(MOUTH[2] + o * 1.5f, r * o * 0.6f, g * o * 0.6f, b * o * 0.6f);
+      break; }
+    case A_HELLO: {  // one eye waves: it sweeps out and back three times like a hand
+      float w = sinf(f * 18.85f) * 1.2f;
+      add(EYE_L, 255, 255, 255); addAt(EYE_R + w, 255, 255, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      break; }
+    case A_BOW: {  // the face dips down toward the mouth and comes back
+      float d = bounce(easeInOut(f)) * 1.5f;
+      addAt(EYE_L - d, 255, 255, 255); addAt(EYE_R + d, 255, 255, 255); add(MOUTH[1], r, g, b);
+      break; }
+    case A_SLEEPYNOD: {  // eyes droop slowly... and jerk open
+      float e = f < 0.8f ? 1 - easeInOut(f / 0.8f) * 0.9f : 1;
+      drawEyes(e, 1, 1, 255); add(MOUTH[1], r * 0.6f, g * 0.6f, b * 0.6f);
+      break; }
+    case A_ALARM: { float v = fmodf(f * 8, 1) < 0.5f; addAll(255 * v, 0, 0); break; }
+    case A_LOWBATT: {  // one red LED at the bottom slowly fading
+      float v = 0.3f + 0.7f * (1 - f); add(MOUTH[1], 255 * v, 0, 0); drawEyes(0.6f, 1, 1, 150);
+      break; }
+    case A_CHARGE: {  // green fills up from the bottom, twice
+      float fill = fmodf(f * 2, 1) * N;
+      for (int i = 0; i < N; i++) { float v = constrain(fill - i, 0, 1); add(MOUTH[1] + i, 0, 255 * v, 60 * v); }
+      break; }
+    case A_UNPLUG: {  // green drains away
+      float fill = (1 - f) * N;
+      for (int i = 0; i < N; i++) { float v = constrain(fill - i, 0, 1); add(MOUTH[1] + i, 0, 200 * v, 40 * v); }
+      break; }
+    case A_LOADING: { float p = f * N * 4; for (int k = 0; k < 3; k++) addAt(p - k, 90 / (k + 1), 90 / (k + 1), 110 / (k + 1)); break; }
+    case A_SUCCESS: {  // a green sweep round, then a bright flash
+      float p = min(1.0f, f * 1.4f) * N;
+      for (int i = 0; i < N; i++) if (i < p) add(i, 0, 255, 80);
+      if (f > 0.75f) addAll(80 * (1 - f) * 4, 255 * (1 - f) * 4, 120 * (1 - f) * 4);
+      break; }
+    case A_ERROR: {  // two sharp red flashes, then a sad face
+      if (f < 0.4f) { float v = fmodf(f * 5, 1) < 0.5f; addAll(255 * v, 0, 0); }
+      else { drawEyes(0.6f, 1, 1, 255); add(MOUTH[0], 255, 40, 40); add(MOUTH[2], 255, 40, 40); }
+      break; }
+    case A_MAIL: {  // a yellow ping from the top, like a notification
+      float d = easeOut(f) * 3, v = 1 - f;
+      addAt(0 + d, 255 * v, 200 * v, 0); addAt(0 - d, 255 * v, 200 * v, 0); add(0, 255 * v, 220 * v, 60 * v);
+      break; }
+    case A_CALL: {  // ring-ring: two blue double pulses
+      float v = fmodf(f * 4, 1) < 0.5f ? bounce(fmodf(f * 8, 1)) : 0; addAll(0, 80 * v, 255 * v);
+      break; }
+    case A_FLASH: { float v = 1 - f; addAll(255 * v, 255 * v, 255 * v); break; }
+    case A_DOWNLOAD: {  // a dot drops from the top to the bottom and lands
+      float p = easeInOut(f) * N / 2; addAt(0 + p, 60, 200, 255); addAt(0 - p, 60, 200, 255);
+      if (f > 0.9f) add(MOUTH[1], 200, 255, 255);
+      break; }
+    case A_AWAY: {  // you left: it looks left, then right, then droops
+      float l = f < 0.33f ? 1 : f < 0.66f ? -1 : 0, e = f < 0.66f ? 1 : 1 - (f - 0.66f) * 2;
+      drawEyes(e, 1 - max(0.0f, l) * 0.6f, 1 + min(0.0f, l) * 0.6f, 255); add(MOUTH[1], r * e, g * e, b * e);
+      break; }
+    case A_BACK: {  // you're back: eyes pop open wide and a big smile grows
+      float e = easeOut(min(1.0f, f * 2)), s = easeOut(f);
+      drawEyes(e, 1.2f, 1.2f, 255); add(MOUTH[1], r, g, b); addAt(MOUTH[0] + (1 - s), r * s, g * s, b * s); addAt(MOUTH[2] - (1 - s), r * s, g * s, b * s);
+      break; }
+    case A_HEADBANG: {  // hard nods on the beat
+      float d = bounce(beatPhase()) * 1.2f;
+      addAt(EYE_L - d, 255, 255, 255); addAt(EYE_R + d, 255, 255, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], r, g, b);
+      break; }
+    default: break;
+  }
+}
+
+// little things it does by itself, picked for the mood and the weather
+void idleEvents(uint32_t now) {
+  static uint32_t next = 5000;
+  if (now < next || animating()) return;
+  next = now + 4000 + random(9000);
+  Mood m = mood();
+  float r, g, b; moodColour(m, r, g, b);
+  int pick = random(100);
+  if (m == ASLEEP) { if (pick < 50) startAnim(A_ZZZ, 2200); return; }
+  if (m == BORED || food < 50) { if (pick < 35) { startAnim(A_YAWN, 1600); chirpYawn(); } else if (pick < 55) startAnim(A_STRETCH, 1400); return; }
+  if (m == EXCITED) { if (pick < 60) startAnim(A_WIGGLE, 900); else startAnim(A_RAINBOW, 1200); return; }
+  if (weatherCode >= 0 && tempC < 4 && pick < 25) { startAnim(A_SNEEZE, 1100); beep(2500, 30); beep(600, 120); return; }
+  static const Anim cute[] = {A_DOUBLEBLINK, A_NOD, A_STRETCH, A_WIGGLE, A_WINK, A_PEEK, A_CURIOUS, A_EYEROLL, A_GIGGLE, A_TWINKLE,
+                              A_SHY, A_PROUD, A_HELLO, A_BOW, A_KISS, A_HEARTEYES, A_SURPRISE};
+  static const int lens[] = {500, 900, 1400, 700, 700, 1500, 1400, 900, 600, 2000, 1800, 1300, 1200, 1200, 1300, 1500, 500};
+  if (pick < 55) { int i = random(sizeof(cute) / sizeof(cute[0])); startAnim(cute[i], lens[i], random(2) ? 1 : -1); }
 }
 
 void drawPet() {
@@ -424,33 +801,60 @@ void drawPet() {
     r = L.r; g = L.g; b = L.b; eyes = L.eyes; mouthStyle = L.mouth;
     if (eyes == 1) m = ASLEEP; else if (m == ASLEEP) m = HAPPY;
   }
-  float breathe = m == ASLEEP ? 0.5f + 0.5f * sinf(now / 1600.0f) : 0.75f + 0.25f * sinf(now / 900.0f);
+  float level = m == ASLEEP ? 8 : BRIGHT;
+  if (faceHidden()) { drawAnim(now, r, g, b); show(level); return; }
 
-  // eyes: look around now and then, blink every few seconds (asleep = closed, just a faint glow)
+  if (dancing && !animating()) {  // bopping to the music: the face bounces on the beat, colours cycle, every 8 bars it changes style
+    float ph = beatPhase(), bob = bounce(ph); int bar = beatNo() / 32; danceStyle = (bar + (int)animArg) % 5;
+    float rr, gg, bb; hsv(fmodf(beatNo() / 16.0f, 1), 0.8f, 1, rr, gg, bb);
+    float e = ph < 0.1f ? 0.5f : 1;
+    switch (danceStyle) {
+      case 0: { float s = bob * 0.5f * (beatNo() % 2 ? 1 : -1);  // sway side to side
+        addAt(EYE_L + s, 255 * e, 255 * e, 255 * e); addAt(EYE_R + s, 255 * e, 255 * e, 255 * e); for (int i = 0; i < 3; i++) addAt(MOUTH[i] + s, rr, gg, bb); break; }
+      case 1: { float d = bob * 0.8f;  // bounce up and down
+        addAt(EYE_L - d, 255 * e, 255 * e, 255 * e); addAt(EYE_R + d, 255 * e, 255 * e, 255 * e); for (int i = 0; i < 3; i++) add(MOUTH[i], rr * (0.5f + 0.5f * bob), gg * (0.5f + 0.5f * bob), bb * (0.5f + 0.5f * bob)); break; }
+      case 2: { drawEyes(e, 1, 1, 255); for (int i = 0; i < N; i++) { float v = 0.5f + 0.5f * sinf((i / (float)N - ph) * 6.28f); add(i, rr * v * 0.5f, gg * v * 0.5f, bb * v * 0.5f); } break; }  // a wave going round
+      case 3: { drawEyes(e, 1, 1, 255); add(MOUTH[1], rr, gg, bb); if (beatNo() % 2) add(MOUTH[0], rr, gg, bb); else add(MOUTH[2], rr, gg, bb);  // mouth bops left-right
+        for (int i = 0; i < N; i++) if (random(100) < 8 * bob) add(i, 120, 120, 120); break; }
+      default: { float d = bounce(ph) * 1.2f;  // headbang
+        addAt(EYE_L - d, 255, 255, 255); addAt(EYE_R + d, 255, 255, 255); for (int i = 0; i < 3; i++) add(MOUTH[i], rr, gg, bb); }
+    }
+    add(2, rr * 0.15f * bob, gg * 0.15f * bob, bb * 0.15f * bob); add(6, rr * 0.15f * bob, gg * 0.15f * bob, bb * 0.15f * bob);
+    show(level); return;
+  }
+
+  drawWeather(now);
+  float breathe = m == ASLEEP ? 0.5f + 0.5f * sinf(now / 1600.0f) : 0.78f + 0.22f * sinf(now / 900.0f);
+
+  // eyes: glance around with easing, blink now and then (asleep = closed, a faint glow)
   if (eyes == 2 || m == EXCITED) { if (now > nextLook) { lookTarget = random(-10, 11) / 14.0f; nextLook = now + 200 + random(400); } }
   else if (eyes == 4) lookTarget = 0;
   else if (now > nextLook) { lookTarget = random(-10, 11) / 20.0f; nextLook = now + 1500 + random(4000); }
   lookX += (lookTarget - lookX) * (eyes == 2 ? 0.3f : 0.08f);
   if (now > nextBlink) { blinkUntil = now + 120; nextBlink = now + (eyes == 4 ? 6000 : 2500) + random(4000); }
   bool closed = eyes == 1 || now < blinkUntil;
-  float e = closed ? 0.08f : 1.0f;
+  float e = closed ? 0.08f : eyes == 4 ? 0.7f : 1.0f;  // concentrating = slightly narrowed
+  bool animEyes = animating() && anim != A_ZZZ && anim != A_HEART && anim != A_PING && anim != A_LIGHTNING && anim != A_YAWN;
   if (eyes == 3) {  // dizzy: eyes chase each other round the ring
     float p = (now % 900) * N / 900.0f;
     addAt(p, 255, 255, 255); addAt(p + N / 2, 255, 255, 255);
-  } else {  // each eye is exactly one LED; looking sideways just makes one eye a little brighter than the other
+  } else if (!animEyes) {  // each eye is one LED; looking sideways makes one a little brighter than the other
     float l = 1 - max(0.0f, lookX) * 0.6f, rr = 1 + min(0.0f, lookX) * 0.6f;
-    add(EYE_L, 255 * e * l, 255 * e * l, 255 * e * l);
-    add(EYE_R, 255 * e * rr, 255 * e * rr, 255 * e * rr);
+    drawEyes(e, l, rr, 255);
   }
 
-  // mouth in the mood colour: happy/excited = wide smile, hungry = opening and closing, bored/cross = one flat LED
-  if (mouthStyle == 2) { int k = (now / 300) % 3; add(MOUTH[1], r, g, b); add(MOUTH[k == 1 ? 0 : 2], r, g, b); }
+  // mouth in the mood colour
+  bool animMouth = animating() && (anim == A_YAWN || anim == A_WIGGLE || anim == A_NOD || anim == A_SHIVER || anim == A_STRETCH
+                                   || anim == A_CHOMP || anim == A_DOUBLEBLINK || anim == A_SNEEZE || anim == A_SURPRISE || anim == A_LISTEN);
+  if (animMouth) {}
+  else if (mouthStyle == 2) { int k = (now / 300) % 3; add(MOUTH[1], r, g, b); add(MOUTH[k == 1 ? 0 : 2], r, g, b); }
   else if (mouthStyle == 3) { float w = 0.5f + 0.5f * sinf(now / 120.0f); add(MOUTH[0], r * w, g * w, b * w); add(MOUTH[1], r, g, b); add(MOUTH[2], r * (1 - w), g * (1 - w), b * (1 - w)); }
   else if (mouthStyle == 1) add(MOUTH[1], r * breathe, g * breathe, b * breathe);
   else if (m == HAPPY || m == EXCITED) for (int i = 0; i < 3; i++) add(MOUTH[i], r * breathe, g * breathe, b * breathe);
   else if (m == HUNGRY) { float o = 0.5f + 0.5f * sinf(now / 250.0f); add(MOUTH[1], r, g, b); add(MOUTH[0], r * o, g * o, b * o); add(MOUTH[2], r * o, g * o, b * o); }
   else add(MOUTH[1], r * breathe, g * breathe, b * breathe);
 
+  drawAnim(now, r, g, b);
 
   // the stroking light: follows the wheel, fades when you stop
   if (swirl >= 0) {
@@ -458,25 +862,24 @@ void drawPet() {
     if (age > 1) swirl = -1;
     else for (int k = 0; k < 3; k++) addAt(swirl - k * 0.5f, 255 * (1 - age) / (k + 1), 200 * (1 - age) / (k + 1), 255 * (1 - age) / (k + 1));
   }
-  ring.setBrightness(m == ASLEEP ? 8 : BRIGHT);
-  show();
+  show(level);
 }
 
+// a blocking spin, only used at start-up before the loop runs
 void spinColour(float r, float g, float b, int ms) {
   uint32_t end = millis() + ms;
   while ((int32_t)(millis() - end) < 0) {
     float p = (millis() % 600) * N / 600.0f;
     for (int k = 0; k < 4; k++) addAt(p - k * 0.6f, r / (k + 1), g / (k + 1), b / (k + 1));
-    ring.setBrightness(BRIGHT); show(); delay(15);
+    show(BRIGHT); delay(15);
   }
 }
 
 void playSound(int s) {
   if (asleepNow()) return;
-  if (s == 1) chirpHappy(); else if (s == 2) chirpSad(); else if (s == 3) chirpYawn(); else if (s == 4) chirpCall();
+  if (s == 1) { chirpHappy(); startAnim(A_WIGGLE, 700); } else if (s == 2) chirpSad(); else if (s == 3) { chirpYawn(); startAnim(A_YAWN, 1500); } else if (s == 4) chirpCall();
 }
 bool screenLive() { return screenLook >= 0 && millis() - screenAt < 1800000UL; }  // laptop spoke in the last 30 min
-
 String moodWords() {
   switch (mood()) {
     case HUNGRY: return "hungry";
@@ -495,30 +898,40 @@ void askToTalk() {
 }
 
 // plays /say.raw with the mouth moving to the voice
+bool anyPress() { return digitalRead(ENC_SW) == LOW || digitalRead(BOOT) == LOW; }
+
 void playVoice() {
   if (!soundOn) return;
   File f = LittleFS.open("/say.raw", "r");
   if (!f) return;
+  while (anyPress()) delay(10);  // don't start while a finger is still on a button
   ledcAttach(SPK_A, 156250, 8); ledcAttach(SPK_B, 156250, 8); ledcOutputInvert(SPK_B, true);
   uint8_t buf[256]; uint32_t t = micros();
   float r, g, b; moodColour(HAPPY, r, g, b);
-  int n;
-  while ((n = f.read(buf, sizeof(buf))) > 0) {
+  int n; bool stopped = false;
+  while (!stopped && (n = f.read(buf, sizeof(buf))) > 0) {
     int peak = 0;
     for (int i = 0; i < n; i++) {
-      ledcWrite(SPK_A, buf[i]); ledcWrite(SPK_B, buf[i]);
+      int s = 128 + (buf[i] - 128) * volume / 100;
+      ledcWrite(SPK_A, s); ledcWrite(SPK_B, s);
       peak = max(peak, abs(buf[i] - 128));
       t += 1000000 / 12000;
       while ((int32_t)(micros() - t) < 0) {}
     }
+    int turn = readWheel();  // turning the wheel while it talks = volume
+    if (turn) { volume = constrain(volume + turn * 10, 10, 100); prefs.putInt("vol", volume); }
+    if (anyPress()) stopped = true;  // any press: stop talking
     float o = min(1.0f, peak / 90.0f);  // mouth opens with the sound
     add(EYE_L, 255, 255, 255); add(EYE_R, 255, 255, 255);
     add(MOUTH[1], r, g, b); add(MOUTH[0], r * o, g * o, b * o); add(MOUTH[2], r * o, g * o, b * o);
-    ring.setBrightness(BRIGHT); show();
+    for (int i = 0; i < N; i++) add(i, 0, 0, 0);
+    if (turn) { float v = volume * N / 100.0f; for (int i = 0; i < N; i++) { float k = constrain(v - i, 0, 1); add(i, 0, 60 * k, 80 * k); } }
+    show(BRIGHT);
   }
   f.close();
   ledcDetach(SPK_A); ledcDetach(SPK_B);
   speakerIdle();
+  if (stopped) { startAnim(A_CANCEL, 300); while (anyPress()) delay(10); }
 }
 
 void touched() {
@@ -546,7 +959,8 @@ void setup() {
   lastAB = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
   randomSeed(esp_random());
   prefs.begin("pet");
-  rot = prefs.getInt("rot", 0); food = prefs.getFloat("food", 80); fun = prefs.getFloat("fun", 80);
+  rot = prefs.getInt("rot", 0); volume = prefs.getInt("vol", 80);
+  for (int i = 0; i < 256; i++) gammaT[i] = (uint8_t)(powf(i / 255.0f, 2.2f) * 255 + 0.5f); food = prefs.getFloat("food", 80); fun = prefs.getFloat("fun", 80);
   ring.begin(); ring.clear(); ring.show();
   setenv("TZ", TIMEZONE, 1); tzset();
   setCpuFrequencyMhz(80);
@@ -573,19 +987,19 @@ void loop() {
   }
   uint32_t now = millis();
 
-  // BOOT is only for the wiring: hold it 3 s
+  // BOOT: hold 3 s for the wiring; the ring fills while you hold so you can see how long is left
   static uint32_t bootDown = 0;
   if (digitalRead(BOOT) == LOW) {
-    if (!bootDown) bootDown = now;
+    if (!bootDown) { bootDown = now; startAnim(A_HOLD, 3000, 0); }
     if (now - bootDown >= 3000) {
-      ring.clear(); ring.show();
+      anim = A_NONE; ring.clear(); ring.show();
       playRaw(WIRING, sizeof(WIRING), WIRING_RATE);
       while (digitalRead(BOOT) == LOW) delay(10);
       bootDown = 0;
     }
-  } else bootDown = 0;
+  } else if (bootDown) { bootDown = 0; if (anim == A_HOLD) anim = A_NONE; }
 
-  // stroking: turn the wheel
+  // stroking: turn the wheel (faster turning = a bigger, brighter swirl)
   int turn = readWheel();
   static bool rotating = false;
   if (turn && digitalRead(ENC_SW) == LOW) {  // hold the wheel and turn: spin the face round until the eyes are on top
@@ -593,50 +1007,49 @@ void loop() {
     prefs.putInt("rot", rot); beep(2093, 6);
     turn = 0;
   }
+  static uint32_t lastTurn = 0;
   if (turn) {
     touched();
     if (!asleepNow()) {
-      swirl = swirl < 0 ? (turn > 0 ? EYE_R : EYE_L) : swirl + turn * 0.5f;
+      float speed = constrain(300.0f / (float)max((uint32_t)1, now - lastTurn), 0.3f, 2.0f);  // clicks per 0.3 s
+      lastTurn = now;
+      swirl = swirl < 0 ? (turn > 0 ? EYE_R : EYE_L) : swirl + turn * 0.5f * speed;
       swirlAt = now;
       fun = min(100.0f, fun + 1.5f);
       static uint32_t lastPurr = 0;
       if (now - lastPurr > 250) { lastPurr = now; purr(); }
       static int strokes = 0; static uint32_t strokeStart = 0;
       if (now - strokeStart > 3000) { strokeStart = now; strokes = 0; }
-      if (++strokes == 16) { excitedUntil = now + 4000; chirpHappy(); }  // a good long stroke
+      if (++strokes == 16) { excitedUntil = now + 4000; chirpHappy(); startAnim(A_HEART, 2400, 2); }  // a good long stroke
     }
   }
 
-  // wheel button: tap = feed, hold 1 s (one beep) = the time, hold 3 s (two beeps) = AI looks at the laptop screen
+  // wheel button: tap = feed, hold 1 s (one beep) = the time, hold 3 s (two beeps) = AI looks / says something.
+  // The ring fills while you hold: a quarter full at 1 s, full at 3 s.
   static bool swWas = false, held = false, held3 = false;
   static uint32_t swDown = 0;
   bool sw = digitalRead(ENC_SW) == LOW;
   if (sw && !swWas) { swDown = now; held = held3 = false; }
+  if (sw && !rotating && now - swDown >= 250 && anim != A_HOLD && !held3) startAnim(A_HOLD, 2750, 1);
   if (sw && !held && now - swDown >= 1000) { held = true; beep(1319, 40); }
-  if (sw && !held3 && now - swDown >= 3000) { held3 = true; beep(1760, 40); }
-  if (!sw && swWas && rotating) { rotating = false; held = true; swWas = sw; return; }  // that was a rotate, not a press
-  if (sw && rotating) held = held3 = true;  // no beeps or time while turning
+  if (sw && !held3 && now - swDown >= 3000) { held3 = true; beep(1760, 40); anim = A_NONE; startAnim(A_PING, 600); }
+  if (!sw && swWas && rotating) { rotating = false; held = true; swWas = sw; anim = A_NONE; return; }  // that was a rotate, not a press
+  if (sw && rotating) { held = held3 = true; anim = A_NONE; }
+  if (!sw && swWas) { if (anim == A_HOLD) anim = A_NONE; }
   if (!sw && swWas && held) {
     touched();
     if (held3) {  // laptop there: it looks at the screen; no laptop: it says something by itself
-      if (screenLive()) Serial.println("ASK"); else askToTalk();
-      excitedUntil = now + 3000; slide(900, 2400, 200);
-    }
-    else sayTime();
+      if (screenLive()) { Serial.println("ASK"); startAnim(A_THINK, 20000, 12); } else { askToTalk(); startAnim(A_THINK, 20000, 12); }
+      slide(900, 2400, 200);
+    } else { startAnim(A_CLOCK, 4000); sayTime(); }
   }
   if (!sw && swWas && !held) {
     touched();
     if (!asleepNow()) {
-      if (food > 90) { chirpGrumpy(); }  // full up
+      if (food > 90) { chirpGrumpy(); startAnim(A_NOD, 600); }  // full up
       else {
         food = min(100.0f, food + 35);
-        for (int i = 0; i < 3; i++) {  // chomp animation
-          float r, g, b; moodColour(HAPPY, r, g, b);
-          add(MOUTH[0], 255, 180, 0); add(MOUTH[2], 255, 180, 0); if (i % 2) add(MOUTH[1], 255, 180, 0);
-          add(EYE_L, 255, 255, 255); add(EYE_R, 255, 255, 255);
-          ring.setBrightness(BRIGHT); show(); delay(120); drawPet(); delay(60);
-        }
-        munch();
+        startAnim(A_CHOMP, 900); munch();
         excitedUntil = now + 2500;
       }
     }
@@ -658,13 +1071,17 @@ void loop() {
   Mood m = mood();
   if (m != ASLEEP && now - lastTouch > 120000 && now - lastCall > 600000) {
     lastCall = now;
-    if (m == HUNGRY || m == BORED) chirpCall(); else if (random(3) == 0) chirpHappy();
+    if (m == HUNGRY || m == BORED) { chirpCall(); startAnim(A_PING, 700); } else if (random(3) == 0) { chirpHappy(); startAnim(A_WIGGLE, 700); }
   }
   static Mood lastMood = HAPPY;
-  if (m == ASLEEP && lastMood != ASLEEP) chirpYawn();
+  if (m == ASLEEP && lastMood != ASLEEP) { chirpYawn(); startAnim(A_YAWN, 1800); }
+  if (m == EXCITED && lastMood != EXCITED) startAnim(A_RAINBOW, 1000);
   lastMood = m;
 
+  idleEvents(now);
+
+  // fixed 50 fps
   static uint32_t lastDraw = 0;
-  if (now - lastDraw > 30) { lastDraw = now; drawPet(); }
+  if (now - lastDraw >= 20) { lastDraw = now; drawPet(); }
   delay(1);
 }

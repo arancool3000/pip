@@ -5,3 +5,4 @@ wiring.h
 __pycache__/
 *.log
 .DS_Store
+ocr

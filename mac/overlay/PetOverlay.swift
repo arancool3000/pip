@@ -19,6 +19,55 @@ final class PetView: NSView {
   var colour = NSColor(calibratedRed: 0.1, green: 1, blue: 0.4, alpha: 1)
   var marks: [Mark] = [], drawn: [(Mark, Double)] = []  // (mark, how much of it is drawn 0..1)
   var marker = false, listening = false, thinking = false, status = "", thinkingSince = Date()
+  var mood = "happy", eventName = "", eventAt = 0.0, lastEventAt = 0.0, music: (bpm: Double, since: Double)? = nil
+  var particles: [(x: Double, y: Double, vx: Double, vy: Double, life: Double, kind: Int, hue: Double)] = []
+  var scale = 0.0, blink = 0.0, squash = 0.0
+  struct MoodLook { let colour: NSColor; let eye: Int }  // eye: 0 normal 1 wide 2 narrow 3 happy-closed 4 worried 5 heart 6 spiral
+  let looks: [String: MoodLook] = [
+    "happy": .init(colour: NSColor(calibratedRed: 0.1, green: 1, blue: 0.4, alpha: 1), eye: 0),
+    "excited": .init(colour: NSColor(calibratedRed: 0, green: 0.85, blue: 1, alpha: 1), eye: 1),
+    "love": .init(colour: NSColor(calibratedRed: 1, green: 0.3, blue: 0.55, alpha: 1), eye: 5),
+    "celebrate": .init(colour: NSColor(calibratedRed: 1, green: 0.8, blue: 0, alpha: 1), eye: 3),
+    "proud": .init(colour: NSColor(calibratedRed: 0.4, green: 0.9, blue: 1, alpha: 1), eye: 3),
+    "laughing": .init(colour: NSColor(calibratedRed: 1, green: 0.85, blue: 0.2, alpha: 1), eye: 3),
+    "focused": .init(colour: NSColor(calibratedRed: 0.45, green: 0.6, blue: 1, alpha: 1), eye: 2),
+    "thinking": .init(colour: NSColor(calibratedRed: 0.6, green: 0.5, blue: 1, alpha: 1), eye: 2),
+    "curious": .init(colour: NSColor(calibratedRed: 0.6, green: 0.25, blue: 1, alpha: 1), eye: 1),
+    "reading": .init(colour: NSColor(calibratedRed: 0.8, green: 0.7, blue: 0.5, alpha: 1), eye: 2),
+    "music": .init(colour: NSColor(calibratedRed: 1, green: 0.2, blue: 0.8, alpha: 1), eye: 3),
+    "gaming": .init(colour: NSColor(calibratedRed: 1, green: 0.5, blue: 0.2, alpha: 1), eye: 1),
+    "worried": .init(colour: NSColor(calibratedRed: 1, green: 0.4, blue: 0.1, alpha: 1), eye: 4),
+    "dizzy": .init(colour: NSColor(calibratedRed: 1, green: 1, blue: 0.2, alpha: 1), eye: 6),
+    "bored": .init(colour: NSColor(calibratedRed: 0.6, green: 0.3, blue: 1, alpha: 1), eye: 2),
+    "sleepy": .init(colour: NSColor(calibratedRed: 0.2, green: 0.3, blue: 0.8, alpha: 1), eye: 2),
+    "asleep": .init(colour: NSColor(calibratedRed: 0.1, green: 0.15, blue: 0.5, alpha: 1), eye: 3),
+    "lowbattery": .init(colour: NSColor(calibratedRed: 1, green: 0.2, blue: 0.2, alpha: 1), eye: 4),
+    "charging": .init(colour: NSColor(calibratedRed: 0.2, green: 1, blue: 0.3, alpha: 1), eye: 1),
+    "shy": .init(colour: NSColor(calibratedRed: 1, green: 0.6, blue: 0.7, alpha: 1), eye: 2),
+  ]
+  func look() -> MoodLook { looks[mood] ?? looks["happy"]! }
+
+  func spawn(_ kind: Int, _ n: Int, at c: CGPoint) {  // 0 heart 1 confetti 2 note 3 zzz 4 sweat 5 sparkle 6 question
+    for _ in 0..<n {
+      particles.append((c.x + Double.random(in: -8...8), c.y, Double.random(in: -40...40), Double.random(in: -90 ... -30),
+                        1.0, kind, Double.random(in: 0...1)))
+    }
+  }
+  func react(_ e: String) {
+    eventAt = t
+    let c = CGPoint(x: pet.x, y: pet.y - 20)
+    switch e {
+    case "love", "song_start": spawn(e == "love" ? 0 : 2, 6, at: c)
+    case "celebrate", "success", "clap": spawn(1, 18, at: c); squash = 1
+    case "laugh": squash = 1
+    case "worried", "error", "low_batt": spawn(4, 1, at: c)
+    case "away": spawn(3, 3, at: c)
+    case "back", "hello", "charging": squash = 1; spawn(5, 6, at: c)
+    case "app_switch", "curious": spawn(6, 1, at: c)
+    case "screenshot": alphaAll = 1
+    default: break
+    }
+  }
   var current = -1, progress = 0.0, bubble = "", bubbleAt = 0.0, lastVersion = -1, fadeAt = 0.0, alphaAll = 1.0
   var t = 0.0, blinkAt = 0.0
 
@@ -157,6 +206,16 @@ final class PetView: NSView {
 
   func tick() {
     t += 1.0 / 60
+    // pop in when there's something to show, shrink away when not
+    let wanted = (current >= 0 || t < fadeAt || listening || thinking || t - eventAt < 4 || music != nil) ? 1.0 : 0.0
+    scale += (wanted - scale) * (wanted > scale ? 0.18 : 0.08)
+    squash = max(0, squash - 0.04)
+    if t > blinkAt + 3 + Double.random(in: 0...3) { blinkAt = t }
+    for i in particles.indices {
+      particles[i].x += particles[i].vx / 60; particles[i].y += particles[i].vy / 60
+      particles[i].vy += (particles[i].kind == 1 ? 120 : -10) / 60; particles[i].life -= 1.0 / 90
+    }
+    particles.removeAll { $0.life <= 0 }
     if home == .zero { home = CGPoint(x: bounds.width - 90, y: bounds.height - 120); pet = home; petTarget = home }
     if current >= 0 && current < marks.count {
       let m = marks[current]
@@ -177,10 +236,40 @@ final class PetView: NSView {
       petTarget = CGPoint(x: mouse.x - f.minX + 34, y: f.height - (mouse.y - f.minY) + 30)
       bubble = listening ? "I'm listening!" : (status.isEmpty ? "hmm, let me see..." : status); bubbleAt = t - 10; alphaAll = 1; fadeAt = t + 60
     }
+    if let m = music, current < 0 {  // dancing: bounce on the beat next to its home spot
+      let beat = ((t - m.since) * m.bpm / 60).truncatingRemainder(dividingBy: 1)
+      petTarget = CGPoint(x: home.x + sin((t - m.since) * m.bpm / 60 * .pi) * 14, y: home.y - abs(sin(beat * .pi)) * 18)
+      if Int((t - m.since) * m.bpm / 60) % 4 == 0 && beat < 0.03 { spawn(2, 1, at: CGPoint(x: pet.x, y: pet.y - 20)) }
+    }
     // fly: quick but smooth, with a little bob when it's resting
     let k = current >= 0 && progress > 0 ? 0.6 : 0.12
     pet.x += (petTarget.x - pet.x) * k; pet.y += (petTarget.y - pet.y) * k
     needsDisplay = true
+  }
+
+  func drawParticles() {
+    for p in particles {
+      let a = CGFloat(min(1, p.life * 1.5)) * CGFloat(alphaAll)
+      switch p.kind {
+      case 0: NSColor(calibratedRed: 1, green: 0.35, blue: 0.55, alpha: a).set(); heart(at: CGPoint(x: p.x, y: p.y), size: 6).fill()
+      case 1: NSColor(calibratedHue: CGFloat(p.hue), saturation: 0.9, brightness: 1, alpha: a).set(); NSRect(x: p.x, y: p.y, width: 5, height: 3).fill()
+      case 2: NSColor(calibratedRed: 1, green: 0.3, blue: 0.85, alpha: a).set()
+        ("♪" as NSString).draw(at: CGPoint(x: p.x, y: p.y), withAttributes: [.font: NSFont.systemFont(ofSize: 14, weight: .bold), .foregroundColor: NSColor(calibratedRed: 1, green: 0.3, blue: 0.85, alpha: a)])
+      case 3: ("z" as NSString).draw(at: CGPoint(x: p.x, y: p.y), withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor(calibratedRed: 0.5, green: 0.6, blue: 1, alpha: a)])
+      case 4: NSColor(calibratedRed: 0.4, green: 0.7, blue: 1, alpha: a).set(); NSBezierPath(ovalIn: NSRect(x: p.x, y: p.y, width: 5, height: 8)).fill()
+      case 5: NSColor(calibratedRed: 1, green: 0.95, blue: 0.6, alpha: a).set()
+        let s = NSBezierPath(); for i in 0..<8 { let r = i % 2 == 0 ? 4.0 : 1.5, ang = Double(i) * .pi / 4; let q = CGPoint(x: p.x + cos(ang) * r, y: p.y + sin(ang) * r); i == 0 ? s.move(to: q) : s.line(to: q) }; s.close(); s.fill()
+      default: ("?" as NSString).draw(at: CGPoint(x: p.x, y: p.y), withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: NSColor(white: 1, alpha: a)])
+      }
+    }
+  }
+  func heart(at c: CGPoint, size s: Double) -> NSBezierPath {
+    let p = NSBezierPath()
+    p.move(to: CGPoint(x: c.x, y: c.y + s)); p.curve(to: CGPoint(x: c.x - s, y: c.y), controlPoint1: CGPoint(x: c.x - s / 2, y: c.y + s * 0.6), controlPoint2: CGPoint(x: c.x - s, y: c.y + s * 0.4))
+    p.curve(to: CGPoint(x: c.x, y: c.y + s * 0.2), controlPoint1: CGPoint(x: c.x - s, y: c.y - s * 0.4), controlPoint2: CGPoint(x: c.x, y: c.y - s * 0.4))
+    p.curve(to: CGPoint(x: c.x + s, y: c.y), controlPoint1: CGPoint(x: c.x, y: c.y - s * 0.4), controlPoint2: CGPoint(x: c.x + s, y: c.y - s * 0.4))
+    p.curve(to: CGPoint(x: c.x, y: c.y + s), controlPoint1: CGPoint(x: c.x + s, y: c.y + s * 0.4), controlPoint2: CGPoint(x: c.x + s / 2, y: c.y + s * 0.6))
+    return p
   }
 
   override func draw(_ dirty: NSRect) {
@@ -212,20 +301,46 @@ final class PetView: NSView {
     }
 
     // the pet pointer: a little glowing ring with eyes, like the real one
+    if scale < 0.02 { drawParticles(); return }
     let bob = current < 0 ? sin(t * 1.5) * 1.5 : 0
-    let c = CGPoint(x: pet.x, y: pet.y + bob), R = 14.0
-    colour.withAlphaComponent(0.25).set(); NSBezierPath(ovalIn: NSRect(x: c.x - R - 8, y: c.y - R - 8, width: 2 * R + 16, height: 2 * R + 16)).fill()
+    let c = CGPoint(x: pet.x, y: pet.y + bob), R = 14.0 * scale * (1 + squash * 0.25 * sin(t * 30))
+    let mc = current >= 0 || t < fadeAt ? colour : look().colour
+    mc.withAlphaComponent(0.25).set(); NSBezierPath(ovalIn: NSRect(x: c.x - R - 8, y: c.y - R - 8, width: 2 * R + 16, height: 2 * R + 16)).fill()
     NSColor(white: 0.08, alpha: 0.92).set(); NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)).fill()
-    let rim = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)); rim.lineWidth = 3; colour.set(); rim.stroke()
-    if t > blinkAt + 4 + Double.random(in: 0...3) { blinkAt = t }
-    let blink = t - blinkAt < 0.12
-    let look = CGPoint(x: (petTarget.x - pet.x) / 60, y: (petTarget.y - pet.y) / 60)
-    let lx = max(-3, min(3, look.x)), ly = max(-3, min(3, look.y))
+    let rim = NSBezierPath(ovalIn: NSRect(x: c.x - R, y: c.y - R, width: 2 * R, height: 2 * R)); rim.lineWidth = 3 * scale; mc.set(); rim.stroke()
+    let blinking = t - blinkAt < 0.12
+    // the eyes look where it's going, or at your mouse when it's resting
+    let mouse = NSEvent.mouseLocation, f = win.frame
+    let target = current >= 0 ? petTarget : CGPoint(x: mouse.x - f.minX, y: f.height - (mouse.y - f.minY))
+    let lx = max(-3, min(3, (target.x - pet.x) / 60)), ly = max(-3, min(3, (target.y - pet.y) / 60))
+    let eye = listening ? 1 : look().eye
     NSColor.white.set()
     for dx in [-6.0, 6.0] {
-      let e = NSRect(x: c.x + dx - 3.5 + lx, y: c.y - 4 + ly - (blink ? -3 : 0), width: 7, height: blink ? 1.5 : 8)
-      NSBezierPath(roundedRect: e, xRadius: 3, yRadius: 3).fill()
+      let ex = c.x + dx * scale - 3.5 + lx, ey = c.y - 4 + ly
+      switch eye {
+      case 3:  // happy: closed arcs
+        let p = NSBezierPath(); p.move(to: CGPoint(x: ex, y: ey + 4)); p.curve(to: CGPoint(x: ex + 7, y: ey + 4), controlPoint1: CGPoint(x: ex + 2, y: ey - 1), controlPoint2: CGPoint(x: ex + 5, y: ey - 1))
+        p.lineWidth = 2; p.stroke()
+      case 5:  // love: little hearts
+        let p = NSBezierPath(); let hx = ex + 3.5, hy = ey + 2
+        p.move(to: CGPoint(x: hx, y: hy + 5)); p.curve(to: CGPoint(x: hx - 4, y: hy), controlPoint1: CGPoint(x: hx - 2, y: hy + 3), controlPoint2: CGPoint(x: hx - 4, y: hy + 2))
+        p.curve(to: CGPoint(x: hx, y: hy + 1), controlPoint1: CGPoint(x: hx - 4, y: hy - 2), controlPoint2: CGPoint(x: hx, y: hy - 2))
+        p.curve(to: CGPoint(x: hx + 4, y: hy), controlPoint1: CGPoint(x: hx, y: hy - 2), controlPoint2: CGPoint(x: hx + 4, y: hy - 2))
+        p.curve(to: CGPoint(x: hx, y: hy + 5), controlPoint1: CGPoint(x: hx + 4, y: hy + 2), controlPoint2: CGPoint(x: hx + 2, y: hy + 3))
+        NSColor(calibratedRed: 1, green: 0.4, blue: 0.6, alpha: 1).set(); p.fill(); NSColor.white.set()
+      case 6:  // dizzy: spirals
+        let p = NSBezierPath(); for i in 0...40 { let a = Double(i) / 6 + t * 6, rr = Double(i) / 10; let q = CGPoint(x: ex + 3.5 + cos(a) * rr, y: ey + 4 + sin(a) * rr); i == 0 ? p.move(to: q) : p.line(to: q) }
+        p.lineWidth = 1.2; p.stroke()
+      default:
+        let h: Double = blinking ? 1.5 : eye == 1 ? 10 : eye == 2 ? 4 : 8, w: Double = eye == 1 ? 8 : 7
+        let e = NSRect(x: ex, y: ey + (8 - h) / 2 + (eye == 4 ? 1 : 0), width: w, height: h)
+        NSBezierPath(roundedRect: e, xRadius: 3, yRadius: 3).fill()
+        if eye == 4 {  // worried brows
+          let p = NSBezierPath(); p.move(to: CGPoint(x: ex + (dx < 0 ? 0 : 7), y: ey - 3)); p.line(to: CGPoint(x: ex + (dx < 0 ? 7 : 0), y: ey - 1)); p.lineWidth = 1.5; p.stroke()
+        }
+      }
     }
+    drawParticles()
     // red dot = the mic is on (only ever while fn is held)
     if listening { NSColor.systemRed.set(); NSBezierPath(ovalIn: NSRect(x: c.x + 10, y: c.y - 22, width: 10, height: 10)).fill() }
     // the pen nib when it's drawing
@@ -236,7 +351,17 @@ final class PetView: NSView {
       let shown = String(bubble.prefix(Int((t - bubbleAt) * 40)))
       let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: NSColor.white.withAlphaComponent(alphaAll)]
       let box = (shown as NSString).boundingRect(with: NSSize(width: 300, height: 400), options: [.usesLineFragmentOrigin], attributes: attrs)
+      // the bubble sits on whichever side of the pointer is clear of the drawings, never on top of them
       var o = CGPoint(x: c.x + 28, y: c.y - box.height - 30)
+      let all = drawn.map { $0.0 } + (current >= 0 && current < marks.count ? [marks[current]] : [])
+      var marksRect = NSRect.null
+      for m in all { let (p, _) = path(m, 1); marksRect = marksRect.union(m.kind == "text" ? NSRect(x: P(m.x, m.y).x, y: P(m.x, m.y).y, width: 200, height: 30) : p.bounds) }
+      let candidate = NSRect(x: o.x, y: o.y, width: box.width + 24, height: box.height + 16)
+      if !marksRect.isNull && candidate.insetBy(dx: -10, dy: -10).intersects(marksRect) {
+        o.y = marksRect.maxY + 24  // below the drawings
+        if o.y + box.height + 16 > bounds.height - 8 { o.y = marksRect.minY - box.height - 40 }  // or above them
+      }
+      if o.y + box.height + 16 > bounds.height - 8 { o.y = bounds.height - box.height - 24 }
       if o.x + box.width + 24 > bounds.width { o.x = c.x - box.width - 52 }
       if o.y < 8 { o.y = c.y + 30 }
       let r = NSRect(x: o.x, y: o.y, width: box.width + 24, height: box.height + 16)
@@ -268,6 +393,13 @@ Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
       if let st = j["settings"] as? [String: Bool] {
         menu.update(st)
         if st["on_screen"] == false { if win.isVisible { win.orderOut(nil) } } else if !win.isVisible { win.orderFrontRegardless() }
+      }
+      if let m = j["mood"] as? String { view.mood = m }
+      if let ev = j["event"] as? [String: Any], let name = ev["last"] as? String, let at = (ev["at"] as? NSNumber)?.doubleValue {
+        if at != view.lastEventAt { view.lastEventAt = at; view.react(name) }
+        if let mu = ev["music"] as? [String: Any], let bpm = (mu["bpm"] as? NSNumber)?.doubleValue {
+          if view.music == nil { view.music = (bpm, view.t) }
+        } else { view.music = nil }
       }
       let s = j["status"] as? String ?? ""
       if !s.isEmpty { view.status = s; view.thinking = true }
@@ -342,16 +474,24 @@ func fnChanged(_ e: NSEvent) {
                             AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
     recorder = try? AVAudioRecorder(url: clip, settings: s)
     recorder?.record(forDuration: 60)  // never more than a minute, even if fn gets stuck
-    view.listening = true
+    view.listening = true; tellBrain("listen")
   } else {
     recorder?.stop(); recorder = nil; view.listening = false
-    if Date().timeIntervalSince(fnAt) < 0.4 { return }  // a quick tap is just fn, not talking
+    if Date().timeIntervalSince(fnAt) < 0.4 { tellBrain("quiet"); return }  // a quick tap is just fn, not talking
     guard let data = try? Data(contentsOf: clip) else { return }
     try? FileManager.default.removeItem(at: clip)
     view.thinking = true; view.thinkingSince = Date()
     var req = URLRequest(url: URL(string: "http://127.0.0.1:4330/talk")!); req.httpMethod = "POST"; req.httpBody = data
     URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
   }
+}
+NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { e in
+  if e.keyCode == 53 { view.drawn = []; view.marks = []; view.current = -1; view.bubble = ""; view.alphaAll = 0; view.fadeAt = 0 }  // Esc: clear everything
+  else if view.current < 0 && view.t < view.fadeAt { view.fadeAt = min(view.fadeAt, view.t + 2) }  // you're typing: get out of the way sooner
+}
+func tellBrain(_ status: String) {
+  var req = URLRequest(url: URL(string: "http://127.0.0.1:4330/status")!); req.httpMethod = "POST"; req.httpBody = status.data(using: .utf8)
+  URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
 }
 AVCaptureDevice.requestAccess(for: .audio) { _ in }
 NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: fnChanged)

@@ -280,9 +280,39 @@ def decide(ctx, hist):
     return pick(m, f"{app}|{title}|{ctx.get('song', '')}", fill)
 
 
+events = {"last": "", "at": 0, "music": None}  # the on-screen pet reads these from /overlay
+
+
+def event(name, arg=""):
+    """Something happened on the Mac: tell the ring and the on-screen pet."""
+    events.update(last=name, at=time.time())
+    board.raw(f"E {name} {arg}\n".strip() + "\n")
+    print(time.strftime("%H:%M:%S"), "event:", name, arg, flush=True)
+
+
+WMO = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "fog", 48: "fog", 51: "light drizzle", 53: "drizzle",
+       55: "drizzle", 61: "light rain", 63: "rain", 65: "heavy rain", 71: "light snow", 73: "snow", 75: "heavy snow", 80: "showers",
+       81: "showers", 82: "heavy showers", 95: "thunderstorm"}
+
+
+def weather_text():
+    if weather["code"] < 0: return "unknown"
+    return f"{WMO.get(weather['code'], 'mixed')}, {weather['temp']:.0f} degrees C"
+
+
+def guess_bpm(song):  # no beat detection: a steady, song-specific tempo so each song dances a little differently
+    return 100 + int(hashlib.md5(song.encode()).hexdigest(), 16) % 36
+
+
+MOOD_EVENTS = {"celebrate": "celebrate", "laughing": "laugh", "love": "love", "worried": "worried", "angry": "angry",
+               "dizzy": "dizzy", "mail": "mail", "shy": "call", "lowbattery": "low_batt", "proud": "clap"}
+
+
 def watch():
     hist = {"switches": [], "mins": 0}
     last_app, since, last_slow, batt, charging, song = None, time.time(), 0, (100, True), True, ""
+    was_idle, typing, quiet, last_mood = False, False, 0, ""
+    shots = len(glob.glob(os.path.expanduser("~/Desktop/Screenshot*"))); downloads = len(os.listdir(os.path.expanduser("~/Downloads")))
     while True:
         front = osa(FRONT)
         app, _, title = front.partition("\t")
@@ -298,11 +328,36 @@ def watch():
             last_slow = t
             was = charging
             batt, charging = battery()
-            if charging and not was: hist["charged_at"] = t
-            song = now_playing()
+            if charging and not was: hist["charged_at"] = t; event("charging")
+            if was and not charging: event("unplugged")
+            if batt <= 15 and not charging and (batt + 1) % 5 == 0: event("low_batt")
+            old, song = song, now_playing()
+            if song and song != old: events["music"] = {"song": song, "bpm": guess_bpm(song)}; event("song_start", guess_bpm(song))
+            if old and not song: events["music"] = None; event("song_stop")
+            try:
+                n = len(glob.glob(os.path.expanduser("~/Desktop/Screenshot*")))
+                if n > shots: event("screenshot")
+                shots = n
+                n = len(os.listdir(os.path.expanduser("~/Downloads")))
+                if n > downloads: event("download")
+                downloads = n
+            except OSError: pass
+        idle = idle_seconds()
+        if app != last_app and last_app is not None: event("app_switch")
+        if idle > 600 and not was_idle: was_idle = True; event("away")
+        if idle < 5 and was_idle: was_idle = False; event("back")
+        if idle < 1.5: quiet = 0
+        else: quiet += 1
+        if quiet == 0 and not typing and hist.get("active", 0) >= 3: typing = True; event("typing")
+        hist["active"] = hist.get("active", 0) + 1 if idle < 1.5 else 0
+        if typing and quiet >= 3: typing = False; event("typing_stop")
         ctx = dict(app=app, title=title, idle=idle_seconds(), batt=batt, charging=charging, song=song,
                    hour=datetime.datetime.now().hour)
-        publish(decide(ctx, hist), ctx)
+        face = decide(ctx, hist)
+        if face["mood"] != last_mood:
+            last_mood = face["mood"]
+            if face["mood"] in MOOD_EVENTS: event(MOOD_EVENTS[face["mood"]])
+        publish(face, ctx)
         time.sleep(1.5)
 
 
@@ -335,6 +390,8 @@ you notice things, you're genuinely useful, you have a light sense of humour, an
 Speak like a real person: natural, concise, specific to what is actually on screen. No baby talk, no "ooh/wow",
 no exclamation marks on every sentence, no generic praise. One or two sentences.
 
+Right now it is {now}. The weather outside is {weather}. (These are facts; never guess the time or date from the screen.)
+
 What you know about the last few times you looked (use it: follow up, notice progress, never repeat yourself):
 {memory}
 
@@ -364,7 +421,8 @@ they're concentrating and don't need you, or it's private). Then keep "say" shor
 Never read out, point at or copy passwords, keys, bank or card details, or private messages.
 
 Say WHERE each drawing goes with "box_2d": [ymin, xmin, ymax, xmax] on a 0-1000 scale - the box tightly around the
-exact thing it is about (the word, number, cell, element), or around an empty patch for a doodle.
+exact thing it is about (the word, number, cell, element), or around an empty patch for a doodle. When it is about
+text, also give "target": the exact characters as they appear on screen (that is used to place it precisely).
 
 Reply as JSON only:
 {"say": "what you say, natural and concise, max 160 characters",
@@ -374,7 +432,7 @@ Reply as JSON only:
  "clipboard": "text to paste, or empty",
  "mood": one of "happy","excited","curious","worried","love","focused","laughing",
  "draw": up to 3 (up to 6 when working) of:
-   {"type": T, "box_2d": [ymin, xmin, ymax, xmax], "text": "only for note"}
+   {"type": T, "box_2d": [ymin, xmin, ymax, xmax], "target": "the exact visible text it is about, if any", "text": "only for note"}
    T is one of:
      "circle"    ring round it          "underline"  line under it        "arrow"  arrow pointing at it
      "box"       rectangle round it     "note"       write "text" next to it (answers and fixes go here)
@@ -458,14 +516,50 @@ def ember_tools():
 
 
 def ember_catalogue():
-    lines = []
+    lines = [f"{n}({a}): {d}" for n, (a, d) in BUILTIN.items()]
     for n, t in sorted(ember_tools().items()):
         props = ", ".join(list((t.get("inputSchema") or {}).get("properties", {}))[:6])
         lines.append(f"{n}({props}): {(t.get('description') or '').split('. ')[0][:110]}")
     return "\n".join(lines)
 
 
+BUILTIN = {
+    "open_app": ("name", "Opens a Mac app by name, e.g. Safari, Notes, Keynote"),
+    "open_url": ("url", "Opens a web address in the default browser"),
+    "type_text": ("text", "Types text into whatever is focused"),
+    "press_keys": ("keys", "Presses a shortcut, e.g. 'cmd+s', 'cmd+shift+n', 'return'"),
+    "calculator": ("expression", "Works out a maths expression exactly, e.g. 17*23 or sqrt(2)"),
+    "now": ("", "The exact current date and time, and the weather"),
+}
+
+
+def builtin_call(name, args):
+    import math, shlex
+    v = str(args.get(BUILTIN[name][0], "")).strip()
+    try:
+        if name == "open_app": return subprocess.run(["open", "-a", v], capture_output=True, text=True, timeout=10).stderr or f"opened {v}"
+        if name == "open_url":
+            if not v.startswith(("http://", "https://")): v = "https://" + v
+            return subprocess.run(["open", v], capture_output=True, text=True, timeout=10).stderr or f"opened {v}"
+        if name == "type_text":
+            osa(f'tell application "System Events" to keystroke {json.dumps(v)}', timeout=10); return "typed"
+        if name == "press_keys":
+            parts = [k.strip().lower() for k in v.replace("-", "+").split("+") if k.strip()]
+            mods = {"cmd": "command down", "command": "command down", "shift": "shift down", "alt": "option down", "option": "option down", "ctrl": "control down", "control": "control down"}
+            using = [mods[k] for k in parts if k in mods]; key = [k for k in parts if k not in mods]
+            if not key: return "no key"
+            codes = {"return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51, "esc": 53, "escape": 53, "left": 123, "right": 124, "down": 125, "up": 126}
+            act = f"key code {codes[key[0]]}" if key[0] in codes else f"keystroke {json.dumps(key[0])}"
+            osa(f'tell application "System Events" to {act}' + (" using {" + ", ".join(using) + "}" if using else ""), timeout=10); return "pressed"
+        if name == "now": return datetime.datetime.now().strftime("%A %-d %B %Y, %H:%M:%S") + "; weather: " + weather_text()
+        if name == "calculator":
+            allowed = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}; allowed.update(abs=abs, round=round, min=min, max=max)
+            return str(eval(compile(v.replace("^", "**"), "<calc>", "eval"), {"__builtins__": {}}, allowed))
+    except Exception as e: return f"error: {e}"
+
+
 def ember_call(name, args):
+    if name in BUILTIN: return builtin_call(name, args)
     if name not in ember_tools(): return f"not allowed: {name}"
     cfg = ember_cfg()
     req = urllib.request.Request(cfg["url"] + "/mcp/call", data=json.dumps({"name": name, "args": args or {}}).encode(),
@@ -478,7 +572,8 @@ def ember_call(name, args):
 
 TOOLS_PROMPT = """
 
-YOU CAN USE TOOLS on {owner}'s Mac (from the Ember app) to actually do what they ask: clicking, typing into the
+YOU CAN USE TOOLS on {owner}'s Mac to actually do what they ask (prefer the simple ones: open_app, open_url, type_text,
+press_keys, calculator; the rest come from the Ember app): clicking, typing into the
 document / cell / slide they mean, opening apps or pages, looking things up, calculating, reading files, the
 weather, timers... To use them, add to your JSON:
   "tools": [{"name": "tool_name", "args": {...}}, ...]   (max 4 per turn, in order)
@@ -495,10 +590,22 @@ def speak(text):  # Pip's voice on the Mac speakers
     def go():
         try:
             import wave
-            pcm = live_voice(text, gemini_key())
-            f = os.path.join(tempfile.gettempdir(), "pip-say.wav")
-            with wave.open(f, "wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(pcm)
-            subprocess.run(["afplay", f], timeout=120); os.remove(f)
+            q, buf, done = queue.Queue(), [], [False]
+            def on_chunk(ch):
+                buf.append(ch)
+                if sum(map(len, buf)) >= 24000 * 2 * 1.5: q.put(b"".join(buf)); buf.clear()  # 1.5 s pieces
+            def player():
+                i = 0
+                while True:
+                    piece = q.get()
+                    if piece is None: return
+                    f = os.path.join(tempfile.gettempdir(), f"pip-say-{i}.wav"); i += 1
+                    with wave.open(f, "wb") as w: w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(piece)
+                    subprocess.run(["afplay", f], timeout=60); os.remove(f)
+            t = threading.Thread(target=player, daemon=True); t.start()
+            live_voice(text, gemini_key(), on_chunk)
+            if buf: q.put(b"".join(buf))
+            q.put(None); t.join()
         except Exception as e:
             print("live voice failed:", e, flush=True)
             voice = "Flo (English (UK))" if "Flo (English (UK))" in subprocess.run(["say", "-v", "?"], capture_output=True, text=True).stdout else "Samantha"
@@ -532,50 +639,110 @@ def gemini(parts, key, json_out=True, think=1024):
     for model in TEXT_MODELS:
         req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                                      data=body, headers={"Content-Type": "application/json", "x-goog-api-key": key})
-        for attempt in range(2):
-            try:
-                out = json.load(urllib.request.urlopen(req, timeout=60))
-                text = out["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text) if json_out else text.strip()
-            except urllib.error.HTTPError as e:
-                last = e
-                if e.code not in (429, 500, 503): break  # not a "busy" error: this model won't do, try the next
-                if e.code == 429: break                   # out of quota today: straight to the fallback
-                time.sleep(2)
-            except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
-                last = e; break
+        try:
+            out = json.load(urllib.request.urlopen(req, timeout=60))
+            text = out["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text) if json_out else text.strip()
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, KeyError, ValueError) as e:
+            last = e  # busy, out of quota, or a bad answer: straight on to the next model
         print(f"  {model} failed ({last}), trying the next", flush=True)
     raise last
 
 
-def live_voice(text, key, style="warmly and naturally, like a friendly, capable person talking to a friend"):
-    """Reads text aloud with the Live model. Returns 24 kHz 16-bit mono PCM."""
-    from websockets.sync.client import connect
-    url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + key
-    with connect(url, max_size=None, open_timeout=15) as ws:
+class LiveVoice:
+    """One Live session kept open and warm, so each line costs one round trip, not a connect + setup."""
+    def __init__(self): self.ws, self.lock = None, threading.Lock()
+
+    def _open(self, key):
+        from websockets.sync.client import connect
+        url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + key
+        ws = connect(url, max_size=None, open_timeout=15)
         ws.send(json.dumps({"setup": {
             "model": "models/" + LIVE_MODEL,
             "generationConfig": {"responseModalities": ["AUDIO"],  # must sit inside generationConfig, not setup
                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}},
-            "systemInstruction": {"parts": [{"text": f"You are a voice. Read the user's text aloud exactly as written, {style}. "
-                                                     "Never add, answer or change anything."}]}}}))
+            "systemInstruction": {"parts": [{"text": "You are a voice. Read the user's text aloud exactly as written, warmly and "
+                                                     "naturally, like a friendly, capable person talking to a friend. Never add, "
+                                                     "answer or change anything."}]}}}))
         json.loads(ws.recv(timeout=15))  # setupComplete (frames arrive as binary JSON)
-        ws.send(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}}))
-        pcm = b""
-        while True:
-            m = json.loads(ws.recv(timeout=30))
-            sc = m.get("serverContent", {})
-            for part in sc.get("modelTurn", {}).get("parts", []):
-                if "inlineData" in part: pcm += base64.b64decode(part["inlineData"]["data"])
-            if sc.get("turnComplete"): return pcm
+        return ws
+
+    def warm(self, key):
+        with self.lock:
+            if self.ws is None:
+                try: self.ws = self._open(key)
+                except Exception as e: print("live warm-up failed:", e, flush=True)
+
+    def say(self, text, key, on_chunk=None):
+        """Returns 24 kHz 16-bit mono PCM; on_chunk gets each piece as it arrives."""
+        with self.lock:
+            for attempt in range(2):
+                try:
+                    if self.ws is None: self.ws = self._open(key)
+                    self.ws.send(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}}))
+                    pcm = b""
+                    while True:
+                        m = json.loads(self.ws.recv(timeout=30))
+                        sc = m.get("serverContent", {})
+                        for part in sc.get("modelTurn", {}).get("parts", []):
+                            if "inlineData" in part:
+                                chunk = base64.b64decode(part["inlineData"]["data"]); pcm += chunk
+                                if on_chunk: on_chunk(chunk)
+                        if sc.get("turnComplete"): return pcm
+                except Exception as e:
+                    try: self.ws.close()
+                    except Exception: pass
+                    self.ws = None
+                    if attempt: raise
+                    print("live voice reconnecting:", e, flush=True)
+
+
+live = LiveVoice()
+def live_voice(text, key, on_chunk=None): return live.say(text, key, on_chunk)
+
+
+LAST_SHOT = os.path.join(tempfile.gettempdir(), "pip-shot.jpg")  # the last screenshot, kept only until the answer is placed
 
 
 def screenshot_part():
-    with tempfile.TemporaryDirectory() as d:
-        shot = os.path.join(d, "s.jpg")
-        subprocess.run(["screencapture", "-x", "-m", "-t", "jpg", shot], check=True, timeout=10)
-        subprocess.run(["sips", "-Z", "1400", shot], capture_output=True, timeout=10)
-        return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(open(shot, "rb").read()).decode()}}
+    subprocess.run(["screencapture", "-x", "-m", "-t", "jpg", LAST_SHOT], check=True, timeout=10)
+    subprocess.run(["sips", "-Z", "1400", LAST_SHOT], capture_output=True, timeout=10)
+    return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(open(LAST_SHOT, "rb").read()).decode()}}
+
+
+def ocr_lines():
+    """Every line of text on the last screenshot with its exact place (the overlay's ocr helper, Apple Vision)."""
+    exe = os.path.join(HERE, "overlay", "ocr")
+    if not os.path.exists(exe) or not os.path.exists(LAST_SHOT): return []
+    try: out = subprocess.run([exe, LAST_SHOT], capture_output=True, text=True, timeout=10).stdout
+    except Exception: return []
+    lines = []
+    for ln in out.splitlines():
+        try: lines.append(json.loads(ln))
+        except ValueError: pass
+    return lines
+
+
+def snap(d, lines):
+    """The model says roughly where a drawing goes and what text it's about; the OCR says exactly where that text is."""
+    target = str(d.get("target") or "").strip().lower()
+    bx = d.get("box_2d")
+    if not target or not lines or not (isinstance(bx, list) and len(bx) == 4): return d
+    cy, cx = (bx[0] + bx[2]) / 2000, (bx[1] + bx[3]) / 2000
+    best, dist = None, 9
+    for L in lines:
+        text = L["text"].lower()
+        if target not in text and not (len(target) > 6 and target[:6] in text): continue
+        lx, ly = L["x"] + L["w"] / 2, L["y"] + L["h"] / 2
+        dd = ((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5
+        if dd < dist: best, dist = L, dd
+    if best is None or dist > 0.25: return d
+    i = best["text"].lower().find(target)
+    if i < 0: i = 0
+    n = len(best["text"]) or 1
+    x0 = best["x"] + best["w"] * i / n; x1 = best["x"] + best["w"] * min(n, i + len(target)) / n  # the span of those characters
+    d = dict(d); d["box_2d"] = [best["y"] * 1000, x0 * 1000, (best["y"] + best["h"]) * 1000, x1 * 1000]
+    return d
 
 
 def ask_ai(audio=None):
@@ -585,12 +752,15 @@ def ask_ai(audio=None):
         key = gemini_key()
         if not key: return show_ai({"say": "I need a Gemini key to see!", "mood": "worried", "draw": []})
         toddler = False
-        prompt = fill(AI_PROMPT + (TALK if audio else "")).replace("{memory}", memory_text())
-        if audio and ember_tools(): prompt += fill(TOOLS_PROMPT) + ember_catalogue()
+        prompt = fill(AI_PROMPT + (TALK if audio else "")).replace("{memory}", memory_text()) \
+            .replace("{now}", datetime.datetime.now().strftime("%A %-d %B %Y, %H:%M")).replace("{weather}", weather_text())
+        if audio: prompt += fill(TOOLS_PROMPT) + ember_catalogue()  # built-in tools always; Ember's when it's running
         overlay["status"] = "hmm, let me see..." if audio else ""
+        if audio: board.raw("A think\n")
+        if audio and settings["sound"]: threading.Thread(target=live.warm, args=(key,), daemon=True).start()
         parts = [{"text": prompt}]
         if audio: parts.append({"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(audio).decode()}})
-        a = gemini(parts + [screenshot_part()], key)
+        a = gemini(parts + [screenshot_part()], key, think=512 if audio else 1024)
         for turn in range(6):  # tool rounds, only when you talked to Pip
             calls = (a.get("tools") or [])[:4] if audio else []
             if not calls or a.get("done", True) and not calls: break
@@ -599,7 +769,9 @@ def ask_ai(audio=None):
                 name = str(call.get("name", ""))
                 overlay["status"] = f"using {name.replace('_', ' ')}..."
                 print("  tool:", name, json.dumps(call.get("args"))[:120], flush=True)
-                results.append(f"{name}: {ember_call(name, call.get('args') or {})}")
+                result = ember_call(name, call.get("args") or {})
+                print("    ->", result[:160].replace("\n", " "), flush=True)
+                results.append(f"{name}: {result}")
             if a.get("say") and not a.get("done"): overlay["status"] = a["say"][:60]
             parts = [{"text": prompt + "\n\nYou said: " + json.dumps({k: a.get(k) for k in ("say", "tools")})
                       + "\n\nTool results:\n" + "\n".join(results)
@@ -619,6 +791,7 @@ def ask_ai(audio=None):
         show_ai({"say": "Hmm, I couldn't see properly.", "mood": "worried", "draw": []})
     finally:
         overlay["status"] = ""
+        board.raw("A done\n")
         asking.release()
 
 
@@ -628,7 +801,11 @@ def show_ai(a):
     ok = ("circle", "arrow", "underline", "box", "note", "text", "star", "heart", "smiley", "flower", "spiral",
           "mess", "zigzag", "loops", "sun", "person", "dots", "wiggle")
     draw = []
+    lines = ocr_lines()
+    try: os.remove(LAST_SHOT)
+    except OSError: pass
     for d in (a.get("draw") or [])[:6 if a.get("working") else 4]:
+        d = snap(d, lines)
         k, bx = d.get("type"), d.get("box_2d")
         if k not in ok or not (isinstance(bx, list) and len(bx) == 4): continue
         y0, x0, y1, x1 = map(f, bx)
@@ -743,7 +920,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"): return self.file("sim.html", "text/html")
         if self.path == "/face.js": return self.file("face.js", "text/javascript")
-        if self.path == "/overlay": return self.json({**overlay, "settings": settings})
+        if self.path == "/overlay": return self.json({**overlay, "settings": settings, "mood": state["face"]["mood"], "event": events})
         if self.path == "/settings": return self.json(settings)
         if self.path == "/state": return self.json({**state, "moods": list(MOODS)})
         if self.path == "/events":
@@ -766,6 +943,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for k, v in body.items():
                 if k in DEFAULTS: settings[k] = bool(v)
             save_settings(); return self.json(settings)
+        if self.path == "/status" and self.headers.get("Origin") is None:  # the overlay: fn held / released
+            s = self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 100)).decode(errors="ignore").strip()
+            if s in ("listen", "quiet"): board.raw(f"A {s}\n")
+            return self.json({"ok": True})
         if self.path == "/talk" and self.headers.get("Origin") is None and not settings["fn_talk"]: return self.json({"ok": False})
         if self.path == "/talk" and self.headers.get("Origin") is None:  # the overlay's fn-key recording (WAV)
             audio = self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 20_000_000))
